@@ -142,7 +142,8 @@ def bond_metrics(clean, ytm, coupon, maturity, dated, ir=None, freq=2, bump_bp=1
     dn = _price_vec((yv - h) / 100.0 / freq, w, N, K, c, maxN)
     dv01_real = (dn - up) / bump_bp                   # per 1bp, per 100 face (real)
     irv = np.ones(len(idx)) if ir is None else ir.reindex(idx).to_numpy(dtype=float)
-    out = pd.DataFrame({"accrued": accrued, "dirty_real": dirty_real, "IR": irv,
+    out = pd.DataFrame({"clean": clean.to_numpy(dtype=float), "ytm": yv,
+                        "accrued": accrued, "dirty_real": dirty_real, "IR": irv,
                         "V": dirty_real * irv, "dv01_per100": dv01_real * irv}, index=idx)
     return out[valid]
 

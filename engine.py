@@ -132,7 +132,8 @@ def leg_series(leg, tenor, cpi, gc):
             if iloc == 0:
                 continue                       # no prior obs in this bond
             tprev = m.index[iloc - 1]
-            Vt, Vp = m["V"].iat[iloc], m["V"].iat[iloc - 1]
+            rt, rp = m.iloc[iloc], m.iloc[iloc - 1]
+            Vt, Vp = rt["V"], rp["V"]
             if not np.isfinite(Vt) or not np.isfinite(Vp):
                 continue
             dV = Vt - Vp
@@ -142,14 +143,18 @@ def leg_series(leg, tenor, cpi, gc):
             cpn = 0.0
             for pdte in pk["pay"]:
                 if tprev < pdte <= t:
-                    irc = float(m["IR"].iat[iloc]) if leg == "tips" else 1.0
+                    irc = float(rt["IR"]) if leg == "tips" else 1.0
                     cpn += (pk["coupon"] / 2.0) * irc
-            bp = (dV + cpn - fin) / denom
-            # bp drag per 1bp of repo half-spread x: extra financing days/360 * (x/10000) * Vp,
-            # normalized by the same monthly denom.
+            pnl = dV + cpn - fin
+            bp = pnl / denom
+            # bp drag per 1bp of repo half-spread x: extra financing days/360 * (x/10000) * Vp.
             fin_sens = (days / 360.0 * Vp / 10000.0) / denom
-            rows[t] = (bp, fin_sens)
-    return pd.DataFrame.from_dict(rows, orient="index", columns=["bp", "fin_sens"]).sort_index()
+            rows[t] = {"cusip": c, "clean": rt["clean"], "yield": rt["ytm"],
+                       "accrued": rt["accrued"], "IR": rt["IR"], "dirty_real": rt["dirty_real"],
+                       "V": Vt, "DV01": rt["dv01_per100"], "denom": denom, "dV": dV,
+                       "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
+                       "bp": bp, "fin_sens": fin_sens}
+    return pd.DataFrame.from_dict(rows, orient="index").sort_index()
 
 
 def build_tenor(tenor, save=True):

@@ -63,9 +63,15 @@ python engine.py window 10y 2024-01-01 2024-12-31 3 3   :: monthly table + windo
 python engine.py window 10y 2020-03-01 2020-03-31 3 3    :: <=45d window -> daily rows
 ::   args: window <tenor> [start] [end] [xT_bp] [xU_bp]   (use - to skip start/end)
 
+:: --- full data dump for hand-replication (boss's ask) ---
+python export.py                            :: exports/breakeven_full.xlsx (5y/10y/30y sheets, ALL inputs
+                                            ::   + intermediates, day-level business days) + per-tenor CSVs + README sheet
+python export.py returns 3 3                :: compact returns-only xlsx at x_TIPS=x_UST=3bp
+
 :: --- interactive explorer (repo-spread sliders + net P&L) ---
-python interactive.py                       :: window: sliders x_TIPS/x_UST (bp), tenor selector,
-                                            ::   view = chart | TABLE (raw numbers), start/end date boxes
+python interactive.py                       :: window: sliders x_TIPS/x_UST, tenor, view=chart|table,
+                                            ::   table freq=auto|daily|monthly, start/end boxes, Export-xlsx button
+                                            ::   (full history by default; resize-crash fixed; instant sliders)
 python interactive.py 5 4 10y               :: headless: chart snapshot PNG at x_TIPS=5, x_UST=4, 10y
 
 :: --- baseline visualizer (PNG into ./plots) ---
@@ -88,8 +94,9 @@ python visualize.py
 - `data_layer.py` — pulls/caches macro + per-bond series; `index_ratio()` (§2.1, validated)
 - `pricing.py` — DCF pricing + DV01 (vectorized per bond; validated vs BBG)
 - `financing.py` — repo financing with a tunable bid/offer half-spread `x` (the slippage knob)
-- `engine.py` — financed breakeven total-return engine -> `cache/returns_<tenor>.parquet`
-- `interactive.py` — interactive explorer: repo-spread sliders, net P&L, long/short BE
+- `engine.py` — financed breakeven total-return engine -> `cache/returns_<tenor>.parquet` (+ `window` CLI)
+- `export.py` — full day-level data dump to Excel/CSV for hand-replication (per-tenor sheets)
+- `interactive.py` — interactive explorer: repo-spread sliders, chart/table, daily/monthly, export
 - `visualize.py` — OTR-spliced charts with auction markers + returns chart
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)

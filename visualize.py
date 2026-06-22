@@ -71,9 +71,11 @@ def gc_repo():
     return m["gcf_treasury"].dropna()
 
 
-def panel(tenor, start="2004-01-01"):
-    """3-row panel for one tenor: yields, breakeven, GC repo, with auction markers."""
+def panel(tenor, start=None):
+    """3-row panel for one tenor: yields, breakeven, GC repo, with auction markers.
+    start=None shows the FULL available history."""
     os.makedirs(PLOTS, exist_ok=True)
+    start = start or "1990-01-01"   # effectively full history
     ry = assemble_otr("tips", tenor, "YLD_YTM_MID")
     ny = assemble_otr("nominal", tenor, "YLD_YTM_MID")
     be = (ny - ry).dropna()
@@ -103,7 +105,6 @@ def panel(tenor, start="2004-01-01"):
     ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 
-    ax.set_xlim(left=pd.Timestamp(start))
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     out = os.path.join(PLOTS, f"panel_{tenor}.png")
     fig.savefig(out, dpi=110); plt.close(fig)
