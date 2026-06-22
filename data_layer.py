@@ -64,8 +64,14 @@ STATIC_FIELDS = ["SECURITY_DES", "ID_CUSIP", "CPN", "MATURITY", "ISSUE_DT", "FIR
 # These return NOTHING as TIPS daily history and must be COMPUTED (see reference.MD):
 #   INT_ACC (accrued, §2.4), REFERENCE_CPI / DRI (§2.1), RISK_MID / DV01 (§4 engine).
 # For NOMINAL bonds, RISK_MID and DUR_ADJ_MID *do* serve historically.
-DAILY_FIELDS_TIPS    = ["PX_CLEAN_MID", "PX_DIRTY_MID", "YLD_YTM_MID", "IDX_RATIO", "PX_LAST"]
-DAILY_FIELDS_NOMINAL = ["PX_CLEAN_MID", "PX_DIRTY_MID", "YLD_YTM_MID", "RISK_MID", "DUR_ADJ_MID", "PX_LAST"]
+# Bulk pull = price + yield only (fast: ~1s/bond). DV01/duration are deliberately NOT
+# bulk-pulled: BBG's computed-analytics fields (RISK_MID, DUR_ADJ_MID) ~3x the request
+# time, TIPS DV01 isn't served historically at all, and we need DV01 for BOTH legs on the
+# same basis -- so the §4 pricing engine computes DV01 for both legs later (consistent).
+# (IDX_RATIO is deliberately excluded: it ~4x's the request time over full history and we
+#  compute the index ratio from CPI via §2.1, validated to match BBG live to 1e-6.)
+DAILY_FIELDS_TIPS    = ["PX_CLEAN_MID", "PX_DIRTY_MID", "YLD_YTM_MID", "PX_LAST"]
+DAILY_FIELDS_NOMINAL = ["PX_CLEAN_MID", "PX_DIRTY_MID", "YLD_YTM_MID", "PX_LAST"]
 
 # Current on-the-runs (validated 2026-06-22). role: tenor + leg.
 SEED_UNIVERSE = [
@@ -173,33 +179,55 @@ def index_ratio(cpi_nsa, base_cpi, settle_date):
     return round(math.floor(dri / base_cpi * 1e6) / 1e6, 5), dri
 
 
-def pull_bonds(skip_existing=True):
+def _save_daily(cusip, rows):
+    if not rows:
+        return 0
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    if "PX_DIRTY_MID" in df:
+        first = df["PX_DIRTY_MID"].first_valid_index()
+        if first is not None:
+            df = df.loc[first:]
+    df.to_parquet(os.path.join(CACHE, "daily", f"{cusip}.parquet"))
+    return len(df)
+
+
+def pull_bonds(skip_existing=True, batch=20):
+    """Pull static + daily for the whole OTR universe, batching history requests by leg
+    (~20 securities/request) since Bloomberg costs the same for one or many per call."""
     _ensure_dirs()
     uni = load_universe()
-    n = len(uni)
-    bbg.open_session()  # reuse one session for the whole loop (huge speedup)
+    todo = uni if not skip_existing else uni[~uni["cusip"].apply(
+        lambda c: os.path.exists(os.path.join(CACHE, "daily", f"{c}.parquet")))]
+    if todo.empty:
+        print("  all bonds already cached")
+        return
+    bbg.open_session()
     try:
-        # batch the static pull (50 securities/request) instead of one call per bond
-        todo = uni if not skip_existing else uni[~uni["cusip"].apply(
-            lambda c: os.path.exists(os.path.join(CACHE, "daily", f"{c}.parquet")))]
-        static_map = {}
+        # static: batch 50/request
         cusips = todo["cusip"].tolist()
+        static_map = {}
         for k in range(0, len(cusips), 50):
             chunk = [f"{c} Govt" for c in cusips[k:k+50]]
             static_map.update(bbg.reference(chunk, STATIC_FIELDS))
-        for i, (_, row) in enumerate(uni.iterrows(), 1):
-            cusip = row["cusip"]
-            dst = os.path.join(CACHE, "daily", f"{cusip}.parquet")
-            if skip_existing and os.path.exists(dst):
-                continue
-            print(f"[{i}/{n}]", end=" ", flush=True)
-            try:
-                pull_bond(cusip, leg=row.get("leg", "tips"),
-                          static=static_map.get(f"{cusip} Govt", {}))
-            except Exception as e:
-                print(f"  {cusip}: ERROR {e}")
+        for c in cusips:
+            st = static_map.get(f"{c} Govt", {})
+            pd.DataFrame([{**{"cusip": c}, **st}]).to_parquet(os.path.join(CACHE, "static", f"{c}.parquet"))
+        # daily: batch by leg (consistent field set), ~batch securities/request
+        done = 0
+        for leg, fields in (("tips", DAILY_FIELDS_TIPS), ("nominal", DAILY_FIELDS_NOMINAL)):
+            cs = todo[todo["leg"] == leg]["cusip"].tolist()
+            for k in range(0, len(cs), batch):
+                grp = cs[k:k+batch]
+                h = bbg.history([f"{c} Govt" for c in grp], fields, START, TODAY)
+                for c in grp:
+                    nrows = _save_daily(c, h.get(f"{c} Govt", []))
+                done += len(grp)
+                print(f"  [{done}/{len(cusips)}] {leg} batch -> {len(grp)} bonds", flush=True)
     finally:
         bbg.close_session()
+    print(f"  done: {len(cusips)} bonds")
 
 
 def preview(cusip=None):

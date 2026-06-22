@@ -58,22 +58,17 @@ def _norm(df):
 def pull():
     os.makedirs(CACHE, exist_ok=True)
     frames = []
-    # TIPS: complete history in one shot
-    tips = _get(f"{TA}/auctioned", {"format": "json", "type": "TIPS"})
-    td = pd.DataFrame(tips)
-    td["leg"] = "tips"
-    frames.append(td)
-    # Nominal Notes + Bonds: page by 2-year date windows on auctionDate
     this_year = 2026
-    for typ in ("Note", "Bond"):
-        for y0 in range(START_YEAR, this_year + 1, 2):
+    # The /auctioned endpoint silently caps at ~250 recent records (misses old TIPS &
+    # nominals), so page EVERY type via /search on 2-year auctionDate windows. TIPS go
+    # back to 1998 (30y) / ~2004 (5y,10y); nominals from START_YEAR.
+    for typ, y_start in (("TIPS", 1998), ("Note", START_YEAR), ("Bond", START_YEAR)):
+        for y0 in range(y_start, this_year + 1, 2):
             j = _get(f"{TA}/search", {"format": "json", "type": typ,
                                       "dateFieldName": "auctionDate",
                                       "startDate": f"{y0}-01-01", "endDate": f"{y0+1}-12-31"})
             if j:
-                d = pd.DataFrame(j)
-                d["leg"] = "nominal"
-                frames.append(d)
+                frames.append(pd.DataFrame(j))
     allrec = pd.concat(frames, ignore_index=True)
     df = _norm(allrec)
     # keep only the tenors we track; drop dupes (same cusip can appear via reopenings)

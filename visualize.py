@@ -71,7 +71,7 @@ def gc_repo():
     return m["gcf_treasury"].dropna()
 
 
-def panel(tenor, start="2009-01-01"):
+def panel(tenor, start="2004-01-01"):
     """3-row panel for one tenor: yields, breakeven, GC repo, with auction markers."""
     os.makedirs(PLOTS, exist_ok=True)
     ry = assemble_otr("tips", tenor, "YLD_YTM_MID")
