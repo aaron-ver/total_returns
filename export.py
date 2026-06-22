@@ -88,6 +88,24 @@ def tenor_full(tenor):
     return out
 
 
+def _format_sheet(ws, date_col=True):
+    """Fix the cosmetics: date column shows as YYYY-MM-DD (not a too-wide datetime that
+    renders as #######), sensible column widths, bold + frozen header row."""
+    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Font
+    ws.freeze_panes = "B2"
+    for cell in ws[1]:                                  # header row
+        cell.font = Font(bold=True)
+    for col in ws.columns:
+        letter = get_column_letter(col[0].column)
+        header = str(col[0].value or "")
+        ws.column_dimensions[letter].width = max(12, len(header) + 2)
+    if date_col:                                        # column A = the date index
+        ws.column_dimensions["A"].width = 12
+        for cell in ws["A"][1:]:
+            cell.number_format = "yyyy-mm-dd"
+
+
 def export_full(path=None):
     os.makedirs(EXPORTS, exist_ok=True)
     path = path or os.path.join(EXPORTS, "breakeven_full.xlsx")
@@ -99,10 +117,13 @@ def export_full(path=None):
     readme = pd.DataFrame(README_ROWS, columns=["column", "description"])
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         readme.to_excel(xl, sheet_name="README", index=False)
+        _format_sheet(xl.sheets["README"], date_col=False)
         for ten in TENORS:
             frames[ten].to_excel(xl, sheet_name=ten)
+            _format_sheet(xl.sheets[ten])
             frames[ten].to_csv(os.path.join(EXPORTS, f"breakeven_{ten}.csv"))
         macro.to_excel(xl, sheet_name="macro")
+        _format_sheet(xl.sheets["macro"])
     print(f"  wrote {path}  ({', '.join(TENORS)} sheets + macro + README)")
     print(f"  wrote per-tenor CSVs in {EXPORTS}")
     return path
@@ -123,6 +144,7 @@ def export_returns(path=None, xT=0.0, xU=0.0):
             d["cum_BEmid_bp"] = d["BEmid_bp"].cumsum()
             d.index.name = "date"
             d.to_excel(xl, sheet_name=ten)
+            _format_sheet(xl.sheets[ten])
     print(f"  wrote {path}  (x_TIPS={xT}bp, x_UST={xU}bp; sheets {', '.join(TENORS)})")
     return path
 
