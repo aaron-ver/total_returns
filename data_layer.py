@@ -186,10 +186,30 @@ def index_ratio(cpi_nsa, base_cpi, settle_date):
     s = pd.Timestamp(settle_date)
     d, D = s.day, calendar.monthrange(s.year, s.month)[1]
     m3 = (s - pd.DateOffset(months=3)); m2 = (s - pd.DateOffset(months=2))
-    cpi_m3 = cpi_nsa[(cpi_nsa.index.year == m3.year) & (cpi_nsa.index.month == m3.month)].iloc[0]
-    cpi_m2 = cpi_nsa[(cpi_nsa.index.year == m2.year) & (cpi_nsa.index.month == m2.month)].iloc[0]
-    dri = cpi_m3 + ((d - 1) / D) * (cpi_m2 - cpi_m3)
+    s3 = cpi_nsa[(cpi_nsa.index.year == m3.year) & (cpi_nsa.index.month == m3.month)]
+    s2 = cpi_nsa[(cpi_nsa.index.year == m2.year) & (cpi_nsa.index.month == m2.month)]
+    if s3.empty or s2.empty or base_cpi is None or pd.isna(base_cpi):
+        return float("nan"), float("nan")            # CPI not available for this settle
+    dri = s3.iloc[0] + ((d - 1) / D) * (s2.iloc[0] - s3.iloc[0])
     return round(math.floor(dri / base_cpi * 1e6) / 1e6, 5), dri
+
+
+def index_ratio_series(cpi_nsa, base_cpi, dates):
+    """Vectorized index ratio (reference.MD §2.1-2.2) for a DatetimeIndex `dates`.
+    Same formula as index_ratio(), validated to BBG 1e-6. Returns a Series aligned to dates."""
+    import calendar, math
+    cpi_by_month = {(ts.year, ts.month): float(v) for ts, v in cpi_nsa.dropna().items()}
+    out = {}
+    for s in dates:
+        s = pd.Timestamp(s)
+        m3 = s - pd.DateOffset(months=3); m2 = s - pd.DateOffset(months=2)
+        a = cpi_by_month.get((m3.year, m3.month)); b = cpi_by_month.get((m2.year, m2.month))
+        if a is None or b is None:
+            continue
+        D = calendar.monthrange(s.year, s.month)[1]
+        dri = a + ((s.day - 1) / D) * (b - a)
+        out[s] = round(math.floor(dri / base_cpi * 1e6) / 1e6, 5)
+    return pd.Series(out)
 
 
 def _save_daily(cusip, rows):

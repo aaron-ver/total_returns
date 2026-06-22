@@ -131,16 +131,52 @@ def coverage():
     return out
 
 
+def returns_panel():
+    """Cumulative financed returns (bp, linear-sum) from engine.py: breakeven by tenor +
+    per-leg breakdown."""
+    os.makedirs(PLOTS, exist_ok=True)
+    rets = {}
+    for ten in ("5y", "10y", "30y"):
+        p = os.path.join(CACHE, f"returns_{ten}.parquet")
+        if os.path.exists(p):
+            rets[ten] = pd.read_parquet(p)
+    if not rets:
+        print("  no returns_*.parquet — run: python engine.py")
+        return
+    fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
+    fig.suptitle("Financed breakeven total return (DV01-normalized, 100k/leg, linear-sum bp)",
+                 fontsize=12)
+    for ten, df in rets.items():
+        axes[0].plot(df.index, df["cum_BE_bp"], lw=1.1, label=f"{ten} breakeven")
+    axes[0].set_ylabel("cum breakeven return (bp)"); axes[0].legend(loc="upper left", fontsize=8)
+    axes[0].grid(alpha=0.3); axes[0].axhline(0, color="k", lw=0.5)
+    d10 = rets.get("10y")
+    if d10 is not None:
+        axes[1].plot(d10.index, d10["cum_TIPS_bp"], color="tab:blue", lw=1.1, label="10y TIPS leg")
+        axes[1].plot(d10.index, d10["cum_UST_bp"], color="tab:red", lw=1.1, label="10y UST leg")
+        axes[1].plot(d10.index, d10["cum_BE_bp"], color="tab:green", lw=1.1, label="10y breakeven (diff)")
+    axes[1].set_ylabel("cum leg return (bp)"); axes[1].legend(loc="upper left", fontsize=8)
+    axes[1].grid(alpha=0.3); axes[1].axhline(0, color="k", lw=0.5)
+    axes[1].xaxis.set_major_locator(mdates.YearLocator()); axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    out = os.path.join(PLOTS, "returns.png")
+    fig.savefig(out, dpi=110); plt.close(fig)
+    print(f"  wrote {out}")
+
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     arg = sys.argv[1] if len(sys.argv) > 1 else "all"
     if arg == "coverage":
         coverage()
+    elif arg == "returns":
+        returns_panel()
     elif arg in ("5y", "10y", "30y"):
         panel(arg)
     else:
         for t in ("5y", "10y", "30y"):
             panel(t)
         coverage()
+        returns_panel()
     print("Done. Open the PNGs in ./plots")

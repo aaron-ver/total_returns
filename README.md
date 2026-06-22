@@ -49,9 +49,17 @@ python data_layer.py preview 91282CPU9 40  :: one bond's static + daily (40 rows
 python auctions.py pull                     :: fetch + cache the Treasury auction calendar
 python auctions.py schedule                 :: build + print the monthly OTR schedule
 
+:: --- return engine (financed breakeven TR) ---
+python engine.py                            :: build 5y/10y/30y -> cache/returns_<tenor>.parquet
+python engine.py 10y                        :: one tenor + summary
+:: output columns: r_TIPS_bp, r_UST_bp, r_BE_bp(=r_TIPS-r_UST), cum_* (linear-sum bp)
+:: each leg = financed LONG at GC mid, daily-renormalized to 100k DV01; r_BE encodes long-TIPS/short-UST.
+:: recombine with an arbitrary beta later as r_TIPS_bp - beta*r_UST_bp (no rebuild needed).
+
 :: --- baseline visualizer (PNG into ./plots) ---
-python visualize.py                         :: real/nominal yields, breakeven, GC repo per tenor + coverage
-python visualize.py 10y                     :: just the 10y panel
+python visualize.py                         :: yields/breakeven/repo per tenor + coverage + returns
+python visualize.py returns                 :: cumulative financed-return charts
+python visualize.py 10y                     :: just the 10y yield panel
 python visualize.py coverage                :: data-coverage / health chart
 ```
 
@@ -66,8 +74,10 @@ python visualize.py
 - `bbg.py` — Bloomberg DAPI connector (`reference()`, `history()`) + validated field map
 - `auctions.py` — TreasuryDirect auction calendar + §9.2.1 OTR-schedule reconstruction
 - `data_layer.py` — pulls/caches macro + per-bond series; `index_ratio()` (§2.1, validated)
+- `pricing.py` — DCF pricing + DV01 (vectorized per bond; validated vs BBG)
 - `financing.py` — repo financing with a tunable bid/offer half-spread `x` (the slippage knob)
-- `visualize.py` — OTR-spliced charts with auction markers
+- `engine.py` — financed breakeven total-return engine -> `cache/returns_<tenor>.parquet`
+- `visualize.py` — OTR-spliced charts with auction markers + returns chart
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)
 

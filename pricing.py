@@ -81,6 +81,72 @@ def risk_dv01(settle, maturity, coupon, ytm, ir=1.0, freq=2, bump_bp=1.0):
     return {"dv01_per_1bp": dv01_cash, "bbg_risk": dv01_cash * 100.0}
 
 
+def pay_dates(maturity, dated, freq=2):
+    """Actual coupon PAYMENT dates: stepping 6m off maturity, strictly after the dated
+    date, up to and including maturity. (Dated date anchors the first accrual period but
+    pays no coupon.)"""
+    maturity = pd.Timestamp(maturity); dated = pd.Timestamp(dated)
+    step = 12 // freq
+    eom = _is_eom(maturity)
+    out, k = [], 0
+    while True:
+        d = _shift_months(maturity, -k * step, eom)
+        if d <= dated:
+            break
+        out.append(d)
+        k += 1
+    return sorted(out)
+
+
+def _price_vec(yp, w, N, K, c, maxN):
+    """Vectorized dirty price per 100 (real), one row per date. yp = periodic yield array."""
+    base = 1.0 + yp                                   # (ndate,)
+    expo = K[None, :] + w[:, None]                    # (ndate, maxN)
+    disc = base[:, None] ** (-expo)
+    mask = K[None, :] < N[:, None]
+    coupon_pv = c * (disc * mask).sum(axis=1)
+    last_expo = (N - 1) + w
+    principal_pv = 100.0 * base ** (-last_expo)
+    return coupon_pv + principal_pv
+
+
+def bond_metrics(clean, ytm, coupon, maturity, dated, ir=None, freq=2, bump_bp=1.0):
+    """Vectorized daily metrics for ONE bond over the dates of `clean`/`ytm` (aligned Series,
+    ytm in percent). Returns a DataFrame indexed by date with:
+       accrued, dirty_real (clean+accrued), IR, V (=dirty_real*IR), dv01_per100 (cash, per 1bp).
+    ir: optional aligned Series (TIPS index ratio); None => 1.0 (nominal).
+    Same DCF as price_real_dirty()/risk_dv01(), just across all dates at once."""
+    idx = clean.index
+    dates = idx.values.astype("datetime64[D]")
+    cds = np.array([np.datetime64(pd.Timestamp(d), "D")
+                    for d in [pd.Timestamp(dated)] + pay_dates(maturity, dated, freq)])
+    pos = np.searchsorted(cds, dates, side="right")   # # of cds <= date
+    valid = (pos >= 1) & (pos < len(cds))             # need a prev anchor and a next coupon
+    pos_c = pos.clip(1, len(cds) - 1)
+    nxt = cds[pos_c]
+    prev = cds[pos_c - 1]
+    period = (nxt - prev) / np.timedelta64(1, "D")
+    w = (nxt - dates) / np.timedelta64(1, "D") / period
+    N = (len(cds) - pos_c).astype(int)                # remaining pay dates (incl. maturity)
+    c = coupon / freq
+    maxN = int(N.max())
+    K = np.arange(maxN)
+    yv = ytm.to_numpy(dtype=float)
+    accrued = c * (1.0 - w)
+    dirty_real = clean.to_numpy(dtype=float) + accrued
+    # DV01 by symmetric 1bp bump on the *model* dirty (clean is held fixed; only the
+    # discounting moves), consistent with risk_dv01().  h is the half-bump in PERCENT
+    # (bump_bp/2 in bp -> *0.01 to percent), so 1bp -> h=0.005%.
+    h = bump_bp / 2.0 / 100.0
+    up = _price_vec((yv + h) / 100.0 / freq, w, N, K, c, maxN)
+    dn = _price_vec((yv - h) / 100.0 / freq, w, N, K, c, maxN)
+    dv01_real = (dn - up) / bump_bp                   # per 1bp, per 100 face (real)
+    irv = np.ones(len(idx)) if ir is None else ir.reindex(idx).to_numpy(dtype=float)
+    out = pd.DataFrame({"accrued": accrued, "dirty_real": dirty_real, "IR": irv,
+                        "V": dirty_real * irv, "dv01_per100": dv01_real * irv}, index=idx)
+    return out[valid]
+
+
 # --- vectorized over a date index ------------------------------------------
 def dv01_series(dates, maturity, coupon, ytm_series, ir_series=None, freq=2):
     """Compute the BBG-risk-equivalent DV01 for each date. ytm_series aligned to `dates`
