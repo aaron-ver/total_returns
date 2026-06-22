@@ -104,7 +104,7 @@ __PLOTLY__
     <div class="grp"><label>Date range</label>
       <div class="row"><input type="date" id="start"></div>
       <div class="row"><input type="date" id="end"></div>
-      <div class="seg" style="margin-top:6px"><button data-range="full">Full</button>
+      <div class="seg" id="range" style="margin-top:6px"><button data-range="full">Full</button>
         <button data-range="5y">5y</button><button data-range="1y">1y</button><button data-range="ytd">YTD</button></div></div>
     <div class="grp"><label>View</label><div class="seg" id="view">
       <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button></div></div>
@@ -215,16 +215,18 @@ tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.t
 seg("view","view"); seg("freq","freq");
 $("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); render();};
 $("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); render();};
-$("start").onchange=e=>{S.start=e.target.value||null; render();};
-$("end").onchange=e=>{S.end=e.target.value||null; render();};
+function setRangeBtn(name){ document.querySelectorAll("#range button").forEach(x=>x.classList.toggle("on", x.dataset.range===name)); }
+$("start").onchange=e=>{S.start=e.target.value||null; setRangeBtn(null); render();};
+$("end").onchange=e=>{S.end=e.target.value||null; setRangeBtn(null); render();};
 $("dl").onclick=downloadCSV;
 document.querySelectorAll("[data-range]").forEach(b=>b.onclick=()=>{
   const all=DATA[S.tenor].dates, lastD=all[all.length-1]; let s=null;
   if(b.dataset.range==="full") s=null;
   else if(b.dataset.range==="ytd") s=lastD.slice(0,4)+"-01-01";
   else { const yrs=+b.dataset.range.replace("y",""); const d=new Date(lastD); d.setFullYear(d.getFullYear()-yrs); s=d.toISOString().slice(0,10); }
-  S.start=s; S.end=null; $("start").value=s||""; $("end").value=""; render();
+  S.start=s; S.end=null; $("start").value=s||""; $("end").value=""; setRangeBtn(b.dataset.range); render();
 });
+setRangeBtn("full");   // default view window is full history
 render();
 </script></body></html>
 """
