@@ -58,10 +58,15 @@ python engine.py 10y                        :: one tenor + summary
 ::   and held constant within the month; r_BE encodes long-TIPS/short-UST.
 :: recombine with an arbitrary beta later as r_TIPS_bp - beta*r_UST_bp (no rebuild needed).
 
+:: raw numbers for a timeframe/month (terminal):
+python engine.py window 10y 2024-01-01 2024-12-31 3 3   :: monthly table + window total (bp)
+python engine.py window 10y 2020-03-01 2020-03-31 3 3    :: <=45d window -> daily rows
+::   args: window <tenor> [start] [end] [xT_bp] [xU_bp]   (use - to skip start/end)
+
 :: --- interactive explorer (repo-spread sliders + net P&L) ---
-python interactive.py                       :: window: sliders for repo x_TIPS/x_UST (bp), tenor selector,
-                                            ::   long-BE / short-BE / mid cumulative net P&L
-python interactive.py 5 4 10y               :: headless: snapshot PNG at x_TIPS=5, x_UST=4, tenor=10y
+python interactive.py                       :: window: sliders x_TIPS/x_UST (bp), tenor selector,
+                                            ::   view = chart | TABLE (raw numbers), start/end date boxes
+python interactive.py 5 4 10y               :: headless: chart snapshot PNG at x_TIPS=5, x_UST=4, 10y
 
 :: --- baseline visualizer (PNG into ./plots) ---
 python visualize.py                         :: yields/breakeven/repo per tenor + coverage + returns

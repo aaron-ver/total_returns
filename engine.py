@@ -170,9 +170,69 @@ def build_tenor(tenor, save=True):
     return df
 
 
+def load_returns(tenor):
+    return pd.read_parquet(os.path.join(CACHE, f"returns_{tenor}.parquet"))
+
+
+def apply_spread(df, xT=0.0, xU=0.0):
+    """Add long/short breakeven daily bp at the given repo half-spreads (bp).
+    Both directions carry the slippage drag (long pays GC+x, short earns GC-x)."""
+    slip = xT * df["s_TIPS"] + xU * df["s_UST"]
+    out = pd.DataFrame({
+        "TIPS_bp": df["r_TIPS_bp"], "UST_bp": df["r_UST_bp"],
+        "BEmid_bp": df["r_BE_bp"],
+        "longBE_bp": df["r_BE_bp"] - slip,
+        "shortBE_bp": -df["r_BE_bp"] - slip,
+    }, index=df.index)
+    return out
+
+
+def window_table(tenor, start=None, end=None, xT=0.0, xU=0.0, freq="auto"):
+    """Raw daily/monthly returns over a window. Returns (table, totals):
+      - span <= 45 days (or freq='D') -> one row per day;
+      - otherwise -> one row per calendar month (sum of daily bp).
+    totals = sum of each column over the whole window (the window net P&L in bp)."""
+    d = apply_spread(load_returns(tenor), xT, xU)
+    if start:
+        d = d[d.index >= pd.Timestamp(start)]
+    if end:
+        d = d[d.index <= pd.Timestamp(end)]
+    d = d.dropna(how="all")
+    totals = d.sum()
+    if len(d) == 0:
+        return d, totals
+    span = (d.index.max() - d.index.min()).days
+    if freq == "auto":
+        freq = "D" if span <= 45 else "M"
+    if freq == "M":
+        tbl = d.resample("ME").sum()
+        tbl.index = tbl.index.strftime("%Y-%m")
+    else:
+        tbl = d.copy()
+        tbl.index = tbl.index.strftime("%Y-%m-%d")
+    return tbl, totals
+
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] == "window":
+        # python engine.py window <tenor> [start] [end] [xT] [xU]
+        a = sys.argv
+        tenor = a[2] if len(a) > 2 else "10y"
+        start = a[3] if len(a) > 3 and a[3] != "-" else None
+        end = a[4] if len(a) > 4 and a[4] != "-" else None
+        xT = float(a[5]) if len(a) > 5 else 0.0
+        xU = float(a[6]) if len(a) > 6 else xT
+        tbl, tot = window_table(tenor, start, end, xT, xU)
+        with pd.option_context("display.max_rows", 400, "display.width", 160):
+            print(f"=== {tenor} returns (bp)  window={start or 'start'}..{end or 'end'}  "
+                  f"repo x_TIPS={xT} x_UST={xU} ===")
+            print(tbl.round(2).to_string())
+            print("-" * 60)
+            print("TOTAL (window net P&L, bp):")
+            print(tot.round(1).to_string())
+        sys.exit(0)
     tenors = [sys.argv[1]] if len(sys.argv) > 1 else ["5y", "10y", "30y"]
     for ten in tenors:
         df = build_tenor(ten)
