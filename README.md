@@ -68,11 +68,11 @@ python export.py                            :: exports/breakeven_full.xlsx (5y/1
                                             ::   + intermediates, day-level business days) + per-tenor CSVs + README sheet
 python export.py returns 3 3                :: compact returns-only xlsx at x_TIPS=x_UST=3bp
 
-:: --- interactive explorer (repo-spread sliders + net P&L) ---
-python interactive.py                       :: window: sliders x_TIPS/x_UST, tenor, view=chart|table,
-                                            ::   table freq=auto|daily|monthly, start/end boxes, Export-xlsx button
-                                            ::   (full history by default; resize-crash fixed; instant sliders)
-python interactive.py 5 4 10y               :: headless: chart snapshot PNG at x_TIPS=5, x_UST=4, 10y
+:: --- interactive HTML dashboard (recommended; instant, offline, no server) ---
+python dashboard.py                         :: builds dashboard.html and opens it in your browser
+                                            ::   controls: tenor, repo x_TIPS/x_UST sliders, date range
+                                            ::   (Full/5y/1y/YTD), chart|table, monthly|daily, Download-CSV
+                                            ::   all recompute is client-side JS -> no lag. Plotly embedded (offline).
 
 :: --- baseline visualizer (PNG into ./plots) ---
 python visualize.py                         :: yields/breakeven/repo per tenor + coverage + returns
@@ -96,8 +96,8 @@ python visualize.py
 - `financing.py` — repo financing with a tunable bid/offer half-spread `x` (the slippage knob)
 - `engine.py` — financed breakeven total-return engine -> `cache/returns_<tenor>.parquet` (+ `window` CLI)
 - `export.py` — full day-level data dump to Excel/CSV for hand-replication (per-tenor sheets)
-- `interactive.py` — interactive explorer: repo-spread sliders, chart/table, daily/monthly, export
-- `visualize.py` — OTR-spliced charts with auction markers + returns chart
+- `dashboard.py` — builds a self-contained interactive HTML dashboard (Plotly + JS; instant, offline)
+- `visualize.py` — OTR-spliced charts with auction markers + returns chart (static PNGs)
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)
 

@@ -12,6 +12,9 @@ plots/*.png
 # Generated exports (regenerable via export.py)
 exports/
 
+# Generated dashboard (regenerable via dashboard.py; ~5 MB)
+dashboard.html
+
 # OS / editor
 .DS_Store
 Thumbs.db
