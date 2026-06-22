@@ -35,13 +35,18 @@ START = "20030101"
 TODAY = "20260620"
 
 # --- Macro / financing series (reference.MD §10, §7.3) --------------------
-# GC financing chain: SOFR is GC from 2018-04; USRG1T (USD O/N GC repo) covers
-# 2004->2018; fed funds as a pre-2004 / sanity fallback.
+# FINANCING DECISION (per desk, 2026-06): we assume TIPS and UST finance at the SAME
+# GC level -- ignoring specialness and repo bid/offer (no sell-side source exists; the
+# big shops build it in-house). Net financing on a breakeven is therefore ~0, and any
+# analysis should discount some slippage for the ignored specials/bid-offer.
+# Primary GC rate = GCFRTSY (DTCC GCF Treasury repo) -- general Treasury collateral, so
+# it serves both legs. SOFR / USRG1T kept as cross-checks and pre-2009 extension.
+GC_REPO = "gcf_treasury"  # the financing series used for both legs
 MACRO = {
-    "cpi_nsa":      ("CPURNSA Index", "PX_LAST"),   # CPI-U NSA (see caveat: current print, not as-first-published)
-    "sofr":         ("SOFRRATE Index", "PX_LAST"),  # GC Treasury repo, 2018-04+
-    "gc_repo_on":   ("USRG1T Curncy", "PX_LAST"),   # USD overnight GC repo, 2004+
-    "gcf_treasury": ("GCFRTSY Index", "PX_LAST"),   # DTCC GCF Treasury repo, 2009-11+
+    "cpi_nsa":      ("CPURNSA Index", "PX_LAST"),   # CPI-U NSA (caveat: current print, not as-first-published)
+    "gcf_treasury": ("GCFRTSY Index", "PX_LAST"),   # DTCC GCF Treasury repo, 2009-11+  <- PRIMARY financing
+    "sofr":         ("SOFRRATE Index", "PX_LAST"),  # GC Treasury repo, 2018-04+ (cross-check)
+    "gc_repo_on":   ("USRG1T Curncy", "PX_LAST"),   # USD overnight GC repo, 2004+ (pre-2009 extension)
     "fed_funds":    ("FEDL01 Index", "PX_LAST"),    # fallback / sanity, 2003+
 }
 
@@ -79,21 +84,30 @@ def _ensure_dirs():
         os.makedirs(os.path.join(CACHE, sub), exist_ok=True)
 
 
-def seed_universe():
-    """Write the initial universe.csv from the current on-the-runs if absent."""
+def build_universe():
+    """Build universe.csv from the auction-derived OTR schedule (every CUSIP that has
+    ever held an OTR role across 2003->present). Falls back to the seed if auctions
+    haven't been pulled yet."""
     _ensure_dirs()
     path = os.path.join(CACHE, "universe.csv")
-    if os.path.exists(path):
-        return path
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["cusip", "role", "leg", "tenor", "note"])
-        w.writerows(SEED_UNIVERSE)
+    try:
+        import auctions
+        uni = auctions.otr_universe()  # columns: cusip, leg, tenor
+        uni.to_csv(path, index=False)
+        print(f"  universe.csv: {len(uni)} bonds from auction schedule")
+    except Exception as e:
+        print(f"  WARN auction universe unavailable ({e}); using seed")
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["cusip", "role", "leg", "tenor", "note"])
+            w.writerows(SEED_UNIVERSE)
     return path
 
 
 def load_universe():
-    path = seed_universe()
+    path = os.path.join(CACHE, "universe.csv")
+    if not os.path.exists(path):
+        build_universe()
     return pd.read_csv(path, dtype=str)
 
 
@@ -117,10 +131,10 @@ def pull_macro():
     return macro
 
 
-def pull_bond(cusip, leg="tips"):
+def pull_bond(cusip, leg="tips", static=None):
     sec = f"{cusip} Govt"
-    # static
-    st = bbg.reference([sec], STATIC_FIELDS).get(sec, {})
+    # static (use prefetched batch if provided)
+    st = static if static is not None else bbg.reference([sec], STATIC_FIELDS).get(sec, {})
     st_df = pd.DataFrame([{**{"cusip": cusip}, **st}])
     st_df.to_parquet(os.path.join(CACHE, "static", f"{cusip}.parquet"))
     # daily
@@ -159,11 +173,61 @@ def index_ratio(cpi_nsa, base_cpi, settle_date):
     return round(math.floor(dri / base_cpi * 1e6) / 1e6, 5), dri
 
 
-def pull_bonds():
+def pull_bonds(skip_existing=True):
     _ensure_dirs()
     uni = load_universe()
-    for _, row in uni.iterrows():
-        pull_bond(row["cusip"], leg=row.get("leg", "tips"))
+    n = len(uni)
+    bbg.open_session()  # reuse one session for the whole loop (huge speedup)
+    try:
+        # batch the static pull (50 securities/request) instead of one call per bond
+        todo = uni if not skip_existing else uni[~uni["cusip"].apply(
+            lambda c: os.path.exists(os.path.join(CACHE, "daily", f"{c}.parquet")))]
+        static_map = {}
+        cusips = todo["cusip"].tolist()
+        for k in range(0, len(cusips), 50):
+            chunk = [f"{c} Govt" for c in cusips[k:k+50]]
+            static_map.update(bbg.reference(chunk, STATIC_FIELDS))
+        for i, (_, row) in enumerate(uni.iterrows(), 1):
+            cusip = row["cusip"]
+            dst = os.path.join(CACHE, "daily", f"{cusip}.parquet")
+            if skip_existing and os.path.exists(dst):
+                continue
+            print(f"[{i}/{n}]", end=" ", flush=True)
+            try:
+                pull_bond(cusip, leg=row.get("leg", "tips"),
+                          static=static_map.get(f"{cusip} Govt", {}))
+            except Exception as e:
+                print(f"  {cusip}: ERROR {e}")
+    finally:
+        bbg.close_session()
+
+
+def preview(cusip=None):
+    """Quick textual look at the cache: macro tail + one bond's head/tail, or list bonds."""
+    _ensure_dirs()
+    m = os.path.join(CACHE, "macro.parquet")
+    if os.path.exists(m):
+        mdf = pd.read_parquet(m)
+        print("=== MACRO (last 5 rows) ===")
+        print(mdf.tail(5).to_string())
+    if cusip is None:
+        uni = load_universe()
+        print(f"\n=== UNIVERSE ({len(uni)} bonds) — sample ===")
+        print(uni.groupby(["leg", "tenor"]).size().to_string())
+        print("\nPass a CUSIP to preview its series, e.g.:  python data_layer.py preview 91282CPU9")
+        return
+    dpath = os.path.join(CACHE, "daily", f"{cusip}.parquet")
+    spath = os.path.join(CACHE, "static", f"{cusip}.parquet")
+    if os.path.exists(spath):
+        print(f"\n=== STATIC {cusip} ===")
+        print(pd.read_parquet(spath).T.to_string())
+    if os.path.exists(dpath):
+        d = pd.read_parquet(dpath)
+        print(f"\n=== DAILY {cusip}  ({len(d)} rows, {str(d.index.min())[:10]}..{str(d.index.max())[:10]}) ===")
+        print("head:\n", d.head(3).to_string())
+        print("tail:\n", d.tail(3).to_string())
+    else:
+        print(f"no daily cache for {cusip}")
 
 
 def status():
@@ -184,8 +248,12 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     if cmd == "macro":
         pull_macro()
+    elif cmd == "universe":
+        build_universe()
     elif cmd == "bonds":
         pull_bonds()
+    elif cmd == "preview":
+        preview(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "status":
         status()
     else:

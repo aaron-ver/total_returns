@@ -11,6 +11,9 @@ import datetime as _dt
 import blpapi
 
 
+_SHARED = None  # reused session for batch/loop work (opening a session is expensive)
+
+
 def _session() -> blpapi.Session:
     opts = blpapi.SessionOptions()
     opts.setServerHost("localhost")
@@ -21,6 +24,22 @@ def _session() -> blpapi.Session:
     if not s.openService("//blp/refdata"):
         raise RuntimeError("Cannot open //blp/refdata")
     return s
+
+
+def open_session():
+    """Open (once) and return a module-level shared session. Call close_session() when done.
+    Reusing one session across many requests is ~100x faster than start/stop per call."""
+    global _SHARED
+    if _SHARED is None:
+        _SHARED = _session()
+    return _SHARED
+
+
+def close_session():
+    global _SHARED
+    if _SHARED is not None:
+        _SHARED.stop()
+        _SHARED = None
 
 
 def _drain(s, on_msg):
@@ -34,8 +53,9 @@ def _drain(s, on_msg):
 
 def reference(securities, fields, overrides=None):
     """Point-in-time reference data. overrides e.g. {'SETTLE_DT': '20260622'}.
-    Returns {security: {field: value}}."""
-    s = _session()
+    Returns {security: {field: value}}. Reuses the shared session if one is open."""
+    shared = _SHARED is not None
+    s = _SHARED if shared else _session()
     try:
         svc = s.getService("//blp/refdata")
         req = svc.createRequest("ReferenceDataRequest")
@@ -71,15 +91,18 @@ def reference(securities, fields, overrides=None):
         _drain(s, handle)
         return out
     finally:
-        s.stop()
+        if not shared:
+            s.stop()
 
 
 def history(securities, fields, start, end, periodicity="DAILY"):
     """Daily (or other) historical series. start/end as 'YYYYMMDD'.
-    Returns {security: [ {date, field: value, ...}, ... ]}."""
+    Returns {security: [ {date, field: value, ...}, ... ]}.
+    Reuses the shared session if one is open."""
     if isinstance(securities, str):
         securities = [securities]
-    s = _session()
+    shared = _SHARED is not None
+    s = _SHARED if shared else _session()
     try:
         svc = s.getService("//blp/refdata")
         req = svc.createRequest("HistoricalDataRequest")
@@ -114,7 +137,8 @@ def history(securities, fields, start, end, periodicity="DAILY"):
         _drain(s, handle)
         return out
     finally:
-        s.stop()
+        if not shared:
+            s.stop()
 
 
 # --- Validated field / ticker map (reference.MD §10) ----------------------
