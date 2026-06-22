@@ -52,9 +52,16 @@ python auctions.py schedule                 :: build + print the monthly OTR sch
 :: --- return engine (financed breakeven TR) ---
 python engine.py                            :: build 5y/10y/30y -> cache/returns_<tenor>.parquet
 python engine.py 10y                        :: one tenor + summary
-:: output columns: r_TIPS_bp, r_UST_bp, r_BE_bp(=r_TIPS-r_UST), cum_* (linear-sum bp)
-:: each leg = financed LONG at GC mid, daily-renormalized to 100k DV01; r_BE encodes long-TIPS/short-UST.
+:: output columns: r_TIPS_bp, r_UST_bp, r_BE_bp(=r_TIPS-r_UST), s_TIPS, s_UST (repo-spread
+::   sensitivity: bp drag per 1bp half-spread), cum_* (linear-sum bp)
+:: each leg = financed LONG at GC mid; DV01 denominator set at the MONTHLY rebalance (100k DV01)
+::   and held constant within the month; r_BE encodes long-TIPS/short-UST.
 :: recombine with an arbitrary beta later as r_TIPS_bp - beta*r_UST_bp (no rebuild needed).
+
+:: --- interactive explorer (repo-spread sliders + net P&L) ---
+python interactive.py                       :: window: sliders for repo x_TIPS/x_UST (bp), tenor selector,
+                                            ::   long-BE / short-BE / mid cumulative net P&L
+python interactive.py 5 4 10y               :: headless: snapshot PNG at x_TIPS=5, x_UST=4, tenor=10y
 
 :: --- baseline visualizer (PNG into ./plots) ---
 python visualize.py                         :: yields/breakeven/repo per tenor + coverage + returns
@@ -77,6 +84,7 @@ python visualize.py
 - `pricing.py` — DCF pricing + DV01 (vectorized per bond; validated vs BBG)
 - `financing.py` — repo financing with a tunable bid/offer half-spread `x` (the slippage knob)
 - `engine.py` — financed breakeven total-return engine -> `cache/returns_<tenor>.parquet`
+- `interactive.py` — interactive explorer: repo-spread sliders, net P&L, long/short BE
 - `visualize.py` — OTR-spliced charts with auction markers + returns chart
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)
