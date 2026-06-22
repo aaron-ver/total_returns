@@ -37,9 +37,13 @@ Requires an active Bloomberg Terminal logged in on this machine (the Desktop API
 python data_layer.py macro                 :: CPI + GC repo series (2003->present)
 python data_layer.py universe              :: build the OTR bond universe from the auction schedule
 python data_layer.py bonds                 :: pull static + daily for every OTR bond (resumable)
+python data_layer.py update                :: INCREMENTAL daily refresh (~45s): macro + new auctions
+                                           ::   + brand-new bonds + re-pull current OTRs only.
+                                           ::   Off-the-run/matured bonds are frozen (never re-pulled).
 python data_layer.py status                :: what's cached
-python data_layer.py preview               :: peek at macro + universe summary
-python data_layer.py preview 91282CPU9     :: peek at one bond's static + daily series
+python data_layer.py preview               :: CPI publications (monthly, m/m + y/y) + GC repo + universe
+python data_layer.py preview 36            :: same, but last 36 CPI months
+python data_layer.py preview 91282CPU9 40  :: one bond's static + daily (40 rows)
 
 :: --- auction calendar / OTR schedule ---
 python auctions.py pull                     :: fetch + cache the Treasury auction calendar

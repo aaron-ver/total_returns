@@ -32,7 +32,7 @@ import bbg
 
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 START = "20030101"
-TODAY = "20260620"
+TODAY = pd.Timestamp.today().strftime("%Y%m%d")  # dynamic so re-runs fetch the latest day
 
 # --- Macro / financing series (reference.MD §10, §7.3) --------------------
 # FINANCING DECISION (per desk, 2026-06): we assume TIPS and UST finance at the SAME
@@ -230,32 +230,86 @@ def pull_bonds(skip_existing=True, batch=20):
     print(f"  done: {len(cusips)} bonds")
 
 
-def preview(cusip=None):
-    """Quick textual look at the cache: macro tail + one bond's head/tail, or list bonds."""
+def preview(cusip=None, rows=24):
+    """Quick textual look at the cache.
+    No cusip: CPI publications (monthly) + GC repo tail + universe summary.
+    With cusip: that bond's static + daily head/tail.  `rows` controls how many."""
     _ensure_dirs()
     m = os.path.join(CACHE, "macro.parquet")
-    if os.path.exists(m):
-        mdf = pd.read_parquet(m)
-        print("=== MACRO (last 5 rows) ===")
-        print(mdf.tail(5).to_string())
-    if cusip is None:
-        uni = load_universe()
-        print(f"\n=== UNIVERSE ({len(uni)} bonds) — sample ===")
-        print(uni.groupby(["leg", "tenor"]).size().to_string())
-        print("\nPass a CUSIP to preview its series, e.g.:  python data_layer.py preview 91282CPU9")
-        return
-    dpath = os.path.join(CACHE, "daily", f"{cusip}.parquet")
-    spath = os.path.join(CACHE, "static", f"{cusip}.parquet")
-    if os.path.exists(spath):
-        print(f"\n=== STATIC {cusip} ===")
-        print(pd.read_parquet(spath).T.to_string())
-    if os.path.exists(dpath):
-        d = pd.read_parquet(dpath)
-        print(f"\n=== DAILY {cusip}  ({len(d)} rows, {str(d.index.min())[:10]}..{str(d.index.max())[:10]}) ===")
-        print("head:\n", d.head(3).to_string())
-        print("tail:\n", d.tail(3).to_string())
-    else:
-        print(f"no daily cache for {cusip}")
+    with pd.option_context("display.max_rows", max(rows, 60), "display.width", 160):
+        if cusip is None:
+            if os.path.exists(m):
+                mdf = pd.read_parquet(m)
+                # CPI prints monthly -> drop the NaN daily rows so you see actual publications
+                cpi = mdf["cpi_nsa"].dropna()
+                cpi_tbl = cpi.tail(rows).to_frame("CPI_U_NSA")
+                cpi_tbl["m/m %"] = (cpi.pct_change() * 100).round(3).tail(rows)
+                cpi_tbl["y/y %"] = (cpi.pct_change(12) * 100).round(3).tail(rows)
+                print(f"=== CPI-U NSA publications (last {rows} months) — CPURNSA Index ===")
+                print(cpi_tbl.to_string())
+                print(f"\n=== GC repo / financing (last {min(rows,10)} rows) ===")
+                print(mdf[["gcf_treasury", "sofr", "gc_repo_on", "fed_funds"]].dropna(how="all").tail(min(rows, 10)).to_string())
+            uni = load_universe()
+            print(f"\n=== UNIVERSE ({len(uni)} bonds) ===")
+            print(uni.groupby(["leg", "tenor"]).size().to_string())
+            print("\nPreview a bond:  python data_layer.py preview 91282CPU9 [rows]")
+            return
+        dpath = os.path.join(CACHE, "daily", f"{cusip}.parquet")
+        spath = os.path.join(CACHE, "static", f"{cusip}.parquet")
+        if os.path.exists(spath):
+            print(f"=== STATIC {cusip} ===")
+            print(pd.read_parquet(spath).T.to_string())
+        if os.path.exists(dpath):
+            d = pd.read_parquet(dpath)
+            print(f"\n=== DAILY {cusip}  ({len(d)} rows, {str(d.index.min())[:10]}..{str(d.index.max())[:10]}) ===")
+            h = max(rows // 2, 3)
+            print(f"head:\n{d.head(h).to_string()}")
+            print(f"tail:\n{d.tail(h).to_string()}")
+        else:
+            print(f"no daily cache for {cusip}")
+
+
+def current_otr_cusips():
+    """The CUSIPs currently holding an OTR role (latest month of the schedule).
+    These are the only bonds whose cache needs refreshing day-to-day; off-the-run and
+    matured bonds are frozen."""
+    import auctions
+    s = auctions.otr_schedule()
+    last = s["month"].max()
+    return s[s["month"] == last][["cusip", "leg"]].drop_duplicates()
+
+
+def update():
+    """Incremental refresh -- cheap, run daily. Does NOT rewrite all 529 bonds:
+      1. macro (CPI/repo) — full but tiny;
+      2. auction calendar + universe — picks up any new auction;
+      3. pull_bonds(skip_existing=True) — fetches only brand-new bonds;
+      4. re-pull just the CURRENT OTRs (their history is short & still growing).
+    Off-the-run / matured bonds are left untouched (their data never changes)."""
+    print("1) macro"); pull_macro()
+    print("2) auctions + universe")
+    try:
+        import auctions
+        auctions.pull()
+    except Exception as e:
+        print(f"   WARN auctions refresh failed: {e}")
+    build_universe()
+    print("3) new bonds (skip existing)"); pull_bonds(skip_existing=True)
+    print("4) refresh current OTRs")
+    otr = current_otr_cusips()
+    bbg.open_session()
+    try:
+        for _, r in otr.iterrows():
+            fields = DAILY_FIELDS_TIPS if r["leg"] == "tips" else DAILY_FIELDS_NOMINAL
+            st = bbg.reference([f"{r['cusip']} Govt"], STATIC_FIELDS).get(f"{r['cusip']} Govt", {})
+            pd.DataFrame([{**{"cusip": r["cusip"]}, **st}]).to_parquet(
+                os.path.join(CACHE, "static", f"{r['cusip']}.parquet"))
+            h = bbg.history(f"{r['cusip']} Govt", fields, START, TODAY).get(f"{r['cusip']} Govt", [])
+            n = _save_daily(r["cusip"], h)
+            print(f"   {r['cusip']} ({r['leg']}) -> {n} rows")
+    finally:
+        bbg.close_session()
+    print("update done")
 
 
 def status():
@@ -280,8 +334,15 @@ if __name__ == "__main__":
         build_universe()
     elif cmd == "bonds":
         pull_bonds()
+    elif cmd == "update":
+        update()
     elif cmd == "preview":
-        preview(sys.argv[2] if len(sys.argv) > 2 else None)
+        # accept: preview | preview <rows> | preview <cusip> [rows]
+        a2 = sys.argv[2] if len(sys.argv) > 2 else None
+        if a2 is not None and a2.isdigit():
+            preview(None, int(a2))
+        else:
+            preview(a2, int(sys.argv[3]) if len(sys.argv) > 3 else 24)
     elif cmd == "status":
         status()
     else:
