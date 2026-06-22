@@ -66,14 +66,23 @@ python visualize.py
 - `bbg.py` — Bloomberg DAPI connector (`reference()`, `history()`) + validated field map
 - `auctions.py` — TreasuryDirect auction calendar + §9.2.1 OTR-schedule reconstruction
 - `data_layer.py` — pulls/caches macro + per-bond series; `index_ratio()` (§2.1, validated)
+- `financing.py` — repo financing with a tunable bid/offer half-spread `x` (the slippage knob)
 - `visualize.py` — OTR-spliced charts with auction markers
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)
 
 ## Known limitations (by design, per desk)
 
-- **No specialness / no repo bid-offer.** Both legs finance at GC (`GCFRTSY`). Net
-  financing on a breakeven ≈ 0. Analyses should discount some slippage.
+- **Repo bid/offer = a tunable knob, not data.** No reliable historical repo bid/offer
+  exists to pull (GCFRTSY is a traded mid with no bid/ask; USRG1T's bid/ask is a ~±50bp
+  indicative band; bond-level RRA repo is entitlement-gated). So `financing.py` models it
+  as a half-spread `x` (default 3bp): the long leg pays GC+x, the short leg earns GC−x.
+  The engine builds BOTH a long-breakeven and a short-breakeven daily-return series per
+  tenor, each carrying the slippage (they are not mirror images).
+- **No specialness.** A one-sided drag on a short nominal; deliberately out of scope and
+  not to be conflated with the symmetric bid/offer `x`.
+- **CPI overrides.** Oct-2025 CPI-U NSA is the only month missing from Bloomberg
+  (shutdown-delayed); hardcoded to Treasury's accrual value 325.604 in `data_layer.CPI_OVERRIDES`.
 - **CPI is the revised print**, not as-first-published; immaterial for the index ratio
   (we use Treasury's published base CPI + the lagged formula) but flagged for rigor.
 - **OTR pairing** uses same-tenor nominal vs TIPS; a 1–3 month maturity gap is accepted

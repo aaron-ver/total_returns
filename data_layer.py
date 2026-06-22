@@ -42,6 +42,11 @@ TODAY = pd.Timestamp.today().strftime("%Y%m%d")  # dynamic so re-runs fetch the 
 # Primary GC rate = GCFRTSY (DTCC GCF Treasury repo) -- general Treasury collateral, so
 # it serves both legs. SOFR / USRG1T kept as cross-checks and pre-2009 extension.
 GC_REPO = "gcf_treasury"  # the financing series used for both legs
+
+# Manual CPI-U NSA overrides. Oct-2025 is the ONLY month in TIPS history missing from
+# the Bloomberg CPURNSA series (shutdown-delayed BLS release); 325.604 is the value
+# Treasury actually used for TIPS accrual. Keyed by month-end (the macro index).
+CPI_OVERRIDES = {"2025-10-31": 325.604}
 MACRO = {
     "cpi_nsa":      ("CPURNSA Index", "PX_LAST"),   # CPI-U NSA (caveat: current print, not as-first-published)
     "gcf_treasury": ("GCFRTSY Index", "PX_LAST"),   # DTCC GCF Treasury repo, 2009-11+  <- PRIMARY financing
@@ -131,6 +136,14 @@ def pull_macro():
         frames.append(df.set_index("date"))
         print(f"  {name:14s} {tic:18s} n={len(df)} {str(df['date'].min())[:10]}->{str(df['date'].max())[:10]}")
     macro = pd.concat(frames, axis=1).sort_index()
+    # apply manual CPI overrides (e.g. the shutdown-missing Oct-2025 print)
+    for d, v in CPI_OVERRIDES.items():
+        ts = pd.Timestamp(d)
+        if ts not in macro.index:
+            macro.loc[ts, :] = pd.NA
+        macro.loc[ts, "cpi_nsa"] = v
+        print(f"  CPI override applied: {d} -> {v}")
+    macro = macro.sort_index()
     out = os.path.join(CACHE, "macro.parquet")
     macro.to_parquet(out)
     print(f"  wrote {out}  ({macro.shape[0]} rows x {macro.shape[1]} cols)")
