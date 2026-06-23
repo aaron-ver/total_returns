@@ -14,7 +14,7 @@ a financed **long**; the breakeven is their difference. Prices per 100 face; ret
 ### Per leg — `TIPS_` (real) and `UST_` (nominal)
 | Column | Meaning |
 |---|---|
-| `*_cusip` | On-the-run bond the leg tracks (issue-date-gated, TIPS-auction-clock roll). |
+| `*_cusip` | Bond the leg tracks. **TIPS** = on-the-run (issue-date-gated, TIPS-auction-clock roll). **UST** = the **maturity-matched** comparator — the nominal whose maturity is the closest most-recent match to the OTR TIPS, then held (5y Apr/Apr & Oct/Oct, 30y Feb/Feb, the staggered 10y cycle; reference.MD §9.2.1). |
 | `*_notional` | Face giving 100k DV01 = `1e7 / DV01` (set at the monthly reset, held all month). |
 | `*_DV01` | Sizing DV01 per 100 face — **our** calc (real-yield×IR for TIPS; not BBG's TIPS risk, which is ~½). Set at the monthly reset, held constant → it is the bp denominator. |
 | `V_tips` / `V_nom` | Cash value per 100 face **at settlement_date**: TIPS = `dirty_real × IR`; UST = `dirty`. |
@@ -39,6 +39,7 @@ a financed **long**; the breakeven is their difference. Prices per 100 face; ret
 | `is_roll_day` | Either leg switched CUSIP that day. |
 | `is_coupon_day` | A coupon paid on either leg that day. |
 | `is_weekend_or_holiday_step` | `d > 1` (step spans a weekend/holiday). |
+| `Is_5y_auction_date` / `Is_10y_auction_date` / `Is_30y_auction_date` | A **TIPS** of that tenor was auctioned that day — **new issue or reopening**. TIPS only (nominal auctions not flagged), so ≤1 flagged day per tenor per month. In every tenor sheet. |
 
 ### Replication chain (hand-check any day)
 ```

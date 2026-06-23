@@ -9,7 +9,13 @@ and a one-click CSV download of the current window.
 
 Output: dashboard.html  (open in any browser; Plotly is embedded so it works offline).
 
-Run:  python dashboard.py        # builds dashboard.html and opens it
+On launch it first calls engine.refresh() — pull the latest data from Bloomberg
+(data_layer.update) and rebuild returns_<tenor>.parquet — so the dashboard is never stale.
+If the Terminal isn't running the pull is skipped and it builds from the cached data.
+
+Run:  python dashboard.py             # refresh, build dashboard.html, and open it
+      python dashboard.py --no-update # build from the cached data as-is (no Bloomberg pull)
+      python dashboard.py --no-open   # build but don't open the browser
 """
 from __future__ import annotations
 import os, sys, json, webbrowser
@@ -65,7 +71,7 @@ __PLOTLY__
   *{box-sizing:border-box}
   body{margin:0;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
   .app{display:grid;grid-template-columns:260px 1fr;height:100vh}
-  .side{background:var(--panel);border-right:1px solid var(--line);padding:16px;overflow:auto}
+  .side{background:var(--panel);border-right:1px solid var(--line);padding:16px;overflow:auto;user-select:none}
   .main{display:flex;flex-direction:column;min-width:0}
   h1{font-size:15px;margin:0 0 14px}
   .grp{margin-bottom:16px}
@@ -74,7 +80,7 @@ __PLOTLY__
   .seg button{flex:1;background:transparent;color:var(--ink);border:0;padding:7px 4px;cursor:pointer;font-size:12px}
   .seg button.on{background:var(--accent);color:#fff}
   .row{display:flex;align-items:center;gap:8px;margin:6px 0}
-  input[type=range]{width:100%}
+  input[type=range]{width:100%;touch-action:none}
   input[type=date]{width:100%;background:#0f1722;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:6px}
   .val{min-width:42px;text-align:right;font-variant-numeric:tabular-nums;color:var(--accent)}
   button.act{width:100%;background:var(--accent);color:#fff;border:0;border-radius:6px;padding:9px;cursor:pointer;font-size:13px;margin-top:4px}
@@ -170,6 +176,11 @@ function render(){
   if(S.view==="chart"){ $("chart").style.display=""; $("tablewrap").style.display="none"; drawChart(s); }
   else { $("chart").style.display="none"; $("tablewrap").style.display=""; drawTable(s); }
 }
+let _raf=0;                                  // coalesce re-renders to one per animation frame: the
+function scheduleRender(){                    // slider handler then returns instantly (so the thumb
+  if(_raf) return;                            // tracks the cursor) and the heavy series+chart redraw
+  _raf=requestAnimationFrame(()=>{_raf=0; render();});  // runs deferred -- a fast drag no longer
+}                                             // backs up the main thread (the stutter / no-drop cursor)
 function drawChart(s){
   const tr=(y,name,color)=>({x:s.dates,y:y,name:name,mode:"lines",line:{width:1.6,color:color},hovertemplate:"%{y:+.1f} bp<extra>"+name+"</extra>"});
   const data=[tr(s.cM,"mid","#8b98a5"),tr(s.cL,"long BE","#3fb950"),tr(s.cS,"short BE","#f85149")];
@@ -213,8 +224,8 @@ const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("but
 tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.tenor;
   tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render();});
 seg("view","view"); seg("freq","freq");
-$("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); render();};
-$("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); render();};
+$("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); scheduleRender();};
+$("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); scheduleRender();};
 function setRangeBtn(name){ document.querySelectorAll("#range button").forEach(x=>x.classList.toggle("on", x.dataset.range===name)); }
 $("start").onchange=e=>{S.start=e.target.value||null; setRangeBtn(null); render();};
 $("end").onchange=e=>{S.end=e.target.value||null; setRangeBtn(null); render();};
@@ -252,4 +263,5 @@ def build(path=None, open_browser=True):
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
+    engine.refresh(update_data="--no-update" not in sys.argv)   # fresh data + returns first
     build(open_browser="--no-open" not in sys.argv)

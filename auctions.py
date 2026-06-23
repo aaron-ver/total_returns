@@ -5,11 +5,14 @@ Source: TreasuryDirect public API (no account/key needed).
   - TIPS history is complete back to 1998 via /securities/auctioned?type=TIPS
   - Nominal Notes/Bonds are paged by date range via /securities/search
 
-This is the backbone for the §9.2 splice. We adopt the desk convention (reference.MD
-§9.2.1): "old OTR through the auction month" -- a bond auctioned in month M only becomes
-the reference on the 1st of month M+1; intra-month auctions are ignored; both legs roll on
-the same monthly clock. So OTR(tenor) for month M = the most recently *auctioned* security
-of that original tenor whose auction date falls strictly before the 1st of month M.
+Two consumers, two views of "on-the-run":
+  * otr_schedule() -- the simple monthly convention (reference.MD §9.2.1): OTR(tenor) for
+    month M = the most recently *auctioned* security of that original tenor whose auction date
+    falls strictly before the 1st of M ("old OTR through the auction month"). This feeds the
+    levels VISUALIZER (visualize.py) and seeds the bond universe (otr_universe -> universe.csv).
+  * new_issues() -- distinct original issues per CUSIP. This feeds the RETURN ENGINE, which
+    builds its own issue-date-gated, maturity-matched roll (engine.roll_schedule); the engine
+    does NOT use otr_schedule. See engine.py and reference.MD "As-built deltas".
 
 Usage:
   python auctions.py pull        # fetch + cache the auction calendar

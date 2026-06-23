@@ -6,9 +6,11 @@ Assembles OTR-continuous series by splicing each month's on-the-run CUSIP (refer
 repo -- with Treasury AUCTION dates marked as vertical lines so you can see exactly when
 the reference bond rolls.
 
-NOTE on splicing: for VISUALIZATION we splice yield/price *levels* at the month boundary,
-so a small step at each roll is expected and visible (different CUSIP). The total-return
-index (later) splices RETURNS, not levels -- that is a separate build, not done here.
+NOTE on splicing: for VISUALIZATION we splice yield/price *levels* at the month boundary
+(via auctions.otr_schedule, the simple monthly convention), so a small step at each roll is
+expected and visible (different CUSIP). The total-return engine (engine.py) splices RETURNS,
+not levels, on its own issue-date-gated / maturity-matched roll -- a separate build; this
+module is just the levels baseline.
 
 Usage:
   python visualize.py                 # build all baseline charts into ./plots

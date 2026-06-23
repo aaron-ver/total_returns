@@ -18,9 +18,15 @@ Replication chain (every column is in the sheet):
   bp         = PnL / denom                        (denom = month's 100k-DV01 rebalance)
   r_BE_bp    = r_TIPS_bp - r_UST_bp ;  cum_* = running sum (linear, not compounded)
 
+Both entry points first call engine.refresh() — pull the latest data from Bloomberg
+(data_layer.update) and rebuild returns_<tenor>.parquet — so the export is never stale.
+Pass --no-update to skip the Bloomberg pull and export straight from the current cache
+(also the automatic fallback if the Terminal isn't running).
+
 Usage:
-  python export.py                 # -> exports/breakeven_full.xlsx + per-tenor CSVs
-  python export.py returns 3 3     # -> exports/breakeven_returns.xlsx at x_TIPS=x_UST=3bp
+  python export.py                 # refresh, then -> exports/breakeven_full.xlsx + per-tenor CSVs
+  python export.py returns 3 3     # refresh, then -> exports/breakeven_returns.xlsx at x_TIPS=x_UST=3bp
+  python export.py --no-update     # export from the cached data as-is (no Bloomberg pull)
 """
 from __future__ import annotations
 import os, sys
@@ -76,8 +82,9 @@ README_ROWS = [
     ("is_roll_day", "either leg switched CUSIP that day"),
     ("is_coupon_day", "a coupon paid on either leg that day"),
     ("is_weekend_or_holiday_step", "d > 1 (the step spans a weekend/holiday)"),
-    ("Is_5y/10y/30y_auction_date", "True if a 5y/10y/30y security (TIPS or nominal) was "
-                                   "auctioned that calendar day (Treasury auction calendar)"),
+    ("Is_5y/10y/30y_auction_date", "True if a 5y/10y/30y TIPS was auctioned that calendar day "
+                                   "— new issue OR reopening. TIPS only, so at most one flagged "
+                                   "day per tenor per month (nominal auctions are not flagged)."),
     ("NOTE 1", "repo bid/offer x & specialness NOT in these numbers (GC mid). For long-BE apply "
                "(GC+x_tips) on TIPS / (GC-x_nom) on UST via the dashboard; short-BE flips."),
     ("NOTE 2", "BBG tie-out: V is the dirty price at settlement_date, so set BBG settlement to "
@@ -89,11 +96,16 @@ README_ROWS = [
 
 _AUCT_DATES = None
 def _auction_date_sets():
-    """Set of auction dates per original tenor (TIPS + nominal, from the Treasury calendar)."""
+    """Set of TIPS auction dates per original tenor — BOTH new issues and reopenings — from
+    the Treasury calendar. TIPS-only on purpose: a single TIPS product auctions at most once
+    in a month, so the per-tenor flag is unambiguous (<=1 flagged day per tenor per month).
+    Including the monthly nominal auctions (as this once did) lit up several days a month for
+    the same tenor, which can't correspond to one product."""
     global _AUCT_DATES
     if _AUCT_DATES is None:
         import auctions
         a = auctions.load_auctions()
+        a = a[a["leg"] == "tips"]                                  # TIPS auctions only
         _AUCT_DATES = {ten: set(pd.to_datetime(a[a["tenor"] == ten]["auctionDate"]).dropna().dt.normalize())
                        for ten in ("5y", "10y", "30y")}
     return _AUCT_DATES
@@ -106,7 +118,7 @@ def tenor_full(tenor):
     gc = engine.gc_series()
     t = engine.leg_series("tips", tenor, cpi, gc).add_prefix("TIPS_")
     u = engine.leg_series("nominal", tenor, cpi, gc).add_prefix("UST_")
-    df = pd.concat([t, u], axis=1)
+    df = pd.concat([t, u], axis=1, sort=True)   # keep the row index date-sorted (pin vs pandas-4 default flip)
     out = pd.DataFrame(index=df.index)
     out.index.name = "date"
     out["settlement_date"] = df["TIPS_settle"].combine_first(df.get("UST_settle"))
@@ -135,7 +147,7 @@ def tenor_full(tenor):
     out["is_roll_day"] = f(df.get("TIPS_is_roll")) | f(df.get("UST_is_roll"))
     out["is_coupon_day"] = f(df.get("TIPS_is_coupon")) | f(df.get("UST_is_coupon"))
     out["is_weekend_or_holiday_step"] = out["d"] > 1
-    # auction-date flags (TIPS or nominal of that tenor auctioned that day) — in EVERY sheet
+    # auction-date flags (a TIPS of that tenor auctioned that day: new issue OR reopening) — every sheet
     asets = _auction_date_sets()
     nd = out.index.normalize()
     for ten in ("5y", "10y", "30y"):
@@ -218,9 +230,11 @@ def export_returns(path=None, xT=0.0, xU=0.0):
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
-    if len(sys.argv) > 1 and sys.argv[1] == "returns":
-        xT = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
-        xU = float(sys.argv[3]) if len(sys.argv) > 3 else xT
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    engine.refresh(update_data="--no-update" not in sys.argv)   # fresh data + returns first
+    if args and args[0] == "returns":
+        xT = float(args[1]) if len(args) > 1 else 0.0
+        xU = float(args[2]) if len(args) > 2 else xT
         export_returns(xT=xT, xU=xU)
     else:
         export_full()

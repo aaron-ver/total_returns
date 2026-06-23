@@ -7,8 +7,11 @@ sign on the UST leg encodes the short. Legs are stored separately so an arbitrar
 be applied later as r_TIPS - beta * r_UST without rebuilding.
 
 Construction (desk decisions, confirmed):
-  * Each leg renormalized DAILY to 100k DV01: bp_t = $PnL_t / DV01_{t-1}.  Algebraically
-    notional-free -> bp_t = (dV + coupon - financing) per 100 face / (DV01 per 100 face)_{t-1}.
+  * Each leg sized to 100k DV01 and expressed in bp: bp_t = $PnL_t / DV01_denom. DV01_denom is
+    the held bond's DV01 per 100 face fixed at the MONTHLY rebalance (1st of the month; notional
+    = 1e7/DV01) and held constant within the month -- a fresh denom epoch starts at each
+    calendar-month begin OR a roll. Algebraically notional-free ->
+    bp_t = (dV + coupon - financing) per 100 face / (DV01 per 100 face)_denom.
   * DV01: real-yield DV01 x IR for TIPS, nominal-yield DV01 for UST (computed in pricing.py;
     we do NOT use BBG's TIPS RISK_MID -- it is ~half).
   * V (cash): TIPS = (clean+accrued) x IR ; UST = clean+accrued.
@@ -17,15 +20,19 @@ Construction (desk decisions, confirmed):
   * Coupon: booked the day a coupon date passes (TIPS = C/2 x IR(pay date)); dirty already
     drops via the accrued reset. No reinvestment / notional does not grow.
   * Financing: days/360 x GC x V_{t-1}, GC = GCFRTSY (mid), both legs as longs.
-  * Roll: ISSUE-DATE-GATED, on the TIPS auction clock (see roll_schedule). A bond is used
-    only on/after its issue date. TIPS roll 1st b-day after a new-issue month (5y May/Nov,
-    10y Feb/Aug, 30y Mar); nominal 5y/30y roll on that boundary; nominal 10y is staggered
-    (stays on the prior note until the new Feb/Aug note's 15th issue date). Freeze between.
+  * Roll: ISSUE-DATE-GATED, on the TIPS auction clock (see roll_schedule). A bond is used only
+    on/after its issue date. TIPS roll 1st b-day after a new-issue month (5y May/Nov, 10y
+    Feb/Aug, 30y Mar). The nominal leg is the MATURITY-MATCHED comparator -- the note whose
+    maturity is the closest most-recent match to the OTR TIPS, then kept: 5y Apr/Apr & Oct/Oct,
+    30y Feb/Feb, and the staggered 10y cycle (Feb:Jan/Nov, Mar:Jan/Feb, ... Aug:Jul/May,
+    Sep:Jul/Aug). Pairing fixed within a month, reconsidered at month starts (validate check C).
   * Accumulate LINEARLY (cumsum of daily bp), not compounded. Convexity ignored.
 
 Usage:
   python engine.py            # build 5y, 10y, 30y -> cache/returns_<tenor>.parquet
   python engine.py 10y        # one tenor, with a summary
+  python engine.py validate   # permanent splice/day-count/pairing checks (A,B,C) per tenor
+  python engine.py window 10y 2024-01-01 2024-12-31 3 3   # raw daily/monthly returns + total
 """
 from __future__ import annotations
 import os, sys
@@ -142,6 +149,79 @@ def _next_bday(ts):
     return cal[i] if i < len(cal) else (pd.Timestamp(ts) + pd.offsets.BDay(1))
 
 
+_MATMAP = None
+def _maturity_map():
+    """{cusip: maturityDate (Timestamp)} from the auction calendar (one row per cusip)."""
+    global _MATMAP
+    if _MATMAP is None:
+        a = auctions.load_auctions().dropna(subset=["maturityDate"])
+        _MATMAP = {c: pd.Timestamp(v) for c, v in a.groupby("cusip")["maturityDate"].first().items()}
+    return _MATMAP
+
+
+def _maturity_matched_nominal(tenor):
+    """Nominal roll events [(eff, iss, cusip)] that, each month, hold the nominal note whose
+    maturity is the closest match to the on-the-run TIPS maturity for that month -- the desk
+    breakeven rule: "get both legs' maturities as close as possible, then keep them" (match
+    the closest most-recent maturity, then freeze the pairing).
+
+    Per month M (held all month -> the monthly DV01/notional rebalance epoch):
+      * target = maturity of the OTR TIPS for month M (its roll-effective month <= M);
+      * eligible nominal notes = those ISSUED by the cutoff. The cutoff is the TIPS roll date
+        in a TIPS-roll month, else the 1st of M. This cutoff is exactly what produces the 10y
+        stagger: the same-cycle 10y note is auctioned/issued on the ~15th, AFTER the 1st-of-
+        month TIPS roll, so for that first month the leg holds the previous closest note
+        (Feb -> Nov, Aug -> May) and only picks up the new note the next month (Mar -> Feb,
+        Sep -> Aug);
+      * among eligible, take the smallest maturity gap ON OR AFTER the target (so the Oct-15
+        5y TIPS pairs with the Oct-31 note, not the 1-day-closer Sep-30); if none matures on
+        or after the target, take the closest before. Ties break to the most recently issued.
+
+    Verified to reproduce the desk table exactly (validate() check C): 5y Apr/Apr & Oct/Oct,
+    30y Feb/Feb, and the 10y cycle Jan:Jul/Aug, Feb:Jan/Nov, Mar:Jan/Feb, Apr-Jul:Jan/Feb,
+    Aug:Jul/May, Sep:Jul/Aug, Oct-Dec:Jul/Aug. (Currently wired in only for 10y; 5y/30y keep
+    their original OTR-at-the-TIPS-boundary branch, which yields the identical pairing.)"""
+    tips_ev = roll_schedule("tips", tenor)
+    if not tips_ev:
+        return []
+    mat = _maturity_map()
+    roll_eff = {pd.Timestamp(e).to_period("M"): pd.Timestamp(e) for e, _c in tips_ev}
+    tl = sorted((pd.Timestamp(e).to_period("M"), mat.get(c)) for e, c in tips_ev)
+    ni = auctions.new_issues("nominal", tenor).copy()
+    ni["issueDate"] = pd.to_datetime(ni["issueDate"])
+    ni["maturity"] = ni["cusip"].map(mat)
+    ni = ni.dropna(subset=["maturity"]).sort_values("issueDate")
+    if ni.empty:
+        return []
+    last = max(tl[-1][0].to_timestamp(), ni["issueDate"].max()) + pd.offsets.MonthBegin(2)
+    months = pd.date_range(tl[0][0].to_timestamp(), last, freq="MS")
+    ev = []
+    for m in months:
+        mper = m.to_period("M")
+        target = None                                      # OTR TIPS maturity for this month
+        for p, mt in tl:
+            if p <= mper:
+                target = mt
+            else:
+                break
+        if target is None or pd.isna(target):
+            continue
+        cutoff = roll_eff.get(mper, m)                     # roll month -> TIPS roll date; else 1st
+        cand = ni[ni["issueDate"] <= cutoff]
+        if cand.empty:
+            continue
+        gap = (cand["maturity"] - target).dt.days
+        after = cand[gap >= 0]
+        if not after.empty:                                # closest maturity ON OR AFTER the TIPS
+            pick = after.assign(g=gap[gap >= 0]).sort_values(
+                ["g", "issueDate"], ascending=[True, False]).iloc[0]
+        else:                                              # none after -> closest before
+            pick = cand.assign(g=-gap).sort_values(
+                ["g", "issueDate"], ascending=[True, False]).iloc[0]
+        ev.append((cutoff, pick["issueDate"], pick["cusip"]))
+    return ev
+
+
 def roll_schedule(leg, tenor):
     """Issue-date-gated roll events [(effective_date, cusip)] (roll-fix spec). A bond is used
     only on/after its issue date; legs ride the TIPS auction clock and the nominal is fitted:
@@ -150,12 +230,18 @@ def roll_schedule(leg, tenor):
         (the new TIPS settled at the prior month-end, so it is already spot-tradeable).
         -> 5y: May/Nov; 10y: Feb/Aug; 30y: Mar.   (reopenings keep the same CUSIP)
       Nominal 5y / 30y: roll ON the TIPS-roll date to the OTR nominal as of that date (its
-        issue date is at/before the boundary -> clean, no mid-month switch).
-      Nominal 10y (SPECIAL): the matching new note (Feb/Aug) isn't issued until the 15th,
-        AFTER the TIPS roll on the 1st. So the nominal stays on the previous note for days
-        1-14 and switches to the new note ON ITS ISSUE DATE (the 15th). Only Feb & Aug new
-        notes are used; intervening new issues (May/Nov) are frozen out.
-      Between TIPS rolls: FREEZE both legs (no rolling to intervening new issues).
+        issue date is at/before the boundary -> clean, no mid-month switch). This yields the
+        maturity-matched pairing directly: 5y Apr/Apr & Oct/Oct, 30y Feb/Feb.
+      Nominal 10y (SPECIAL): the matching new note (Feb/Aug) isn't issued until the ~15th,
+        AFTER the TIPS roll on the 1st, so a same-month switch would briefly hold a worse
+        match. Instead the leg is MATURITY-MATCHED to the OTR TIPS each month (see
+        _maturity_matched_nominal): it holds the nominal note whose maturity is closest to
+        the TIPS maturity and KEEPS it. That produces the desk cycle Jan:Jul/Aug, Feb:Jan/Nov,
+        Mar:Jan/Feb, Apr-Jul:Jan/Feb, Aug:Jul/May, Sep-Dec:Jul/Aug -- i.e. in the first month
+        of a new TIPS the leg stays on the previous closest note (Feb->Nov, Aug->May) and
+        rolls to the new note the next month (Mar->Feb, Sep->Aug). Uses the May & Nov notes
+        too (not only Feb/Aug). Verified by validate() check C.
+      Between TIPS rolls: FREEZE both legs (the maturity-match keeps the same pairing).
     """
     ev = []   # (effective_date, issue_date, cusip)
     if leg == "tips":
@@ -164,13 +250,8 @@ def roll_schedule(leg, tenor):
             eff = _first_bday_on_or_after(iss + pd.offsets.MonthBegin(1))   # 1st b-day of next month
             if eff is not None:
                 ev.append((eff, iss, r["cusip"]))
-    elif tenor == "10y":                                   # nominal 10y: staggered, 15th of Feb/Aug
-        ni = auctions.new_issues("nominal", "10y")
-        ni = ni[pd.to_datetime(ni["issueDate"]).dt.month.isin([2, 8])]
-        for _, r in ni.iterrows():
-            iss = pd.Timestamp(r["issueDate"]); eff = _first_bday_on_or_after(iss)
-            if eff is not None:
-                ev.append((eff, iss, r["cusip"]))
+    elif tenor == "10y":                                   # nominal 10y: maturity-matched to TIPS
+        ev.extend(_maturity_matched_nominal("10y"))         # closest-maturity, keep-and-roll cycle
     else:                                                  # nominal 5y / 30y: roll at TIPS boundary
         ni = auctions.new_issues("nominal", tenor).sort_values("issueDate")
         iss = pd.to_datetime(ni["issueDate"]).to_numpy(); cus = ni["cusip"].tolist()
@@ -308,14 +389,63 @@ def load_returns(tenor):
     return pd.read_parquet(os.path.join(CACHE, f"returns_{tenor}.parquet"))
 
 
+def refresh(update_data=True, tenors=("5y", "10y", "30y"), rebuild=True):
+    """One call to make sure everything downstream is up-to-date. Used by export.py and
+    dashboard.py so they never serve stale numbers.
+      1. update_data -> data_layer.update(): pull the latest CPI/repo, auction calendar, any
+         new bonds, and re-pull the current OTRs from Bloomberg. Needs the Terminal; if it is
+         unavailable (or any step fails) we WARN and fall back to the cached data so the
+         export/dashboard still builds — it just won't include today's brand-new prints.
+      2. rebuild -> build_tenor() for each tenor: rewrite returns_<tenor>.parquet from the
+         (now-fresh) cache, so load_returns()/the dashboard payload reflect the latest data
+         and the current engine logic (e.g. the maturity-matched pairing).
+    Returns the dict of rebuilt return frames (or loaded ones if rebuild=False)."""
+    if update_data:
+        try:
+            import data_layer
+            data_layer.update()
+        except Exception as e:
+            print(f"  [refresh] live data update skipped — using cached data ({type(e).__name__}: {e})")
+    out = {}
+    for t in tenors:
+        try:
+            out[t] = build_tenor(t) if rebuild else load_returns(t)
+        except Exception as e:
+            print(f"  [refresh] {t} {'rebuild' if rebuild else 'load'} failed: {e}")
+    return out
+
+
+# Desk maturity-month pairing table (TIPS_maturity_month, nominal_maturity_month) expected per
+# PRICING calendar month -- "get both legs' maturities as close as possible, then keep them":
+#   5y : Apr-TIPS (May-Oct) -> Apr/Apr ; Oct-TIPS (Nov-Apr) -> Oct/Oct
+#   30y: always Feb/Feb
+#   10y: Jan Jul/Aug | Feb Jan/Nov | Mar Jan/Feb | Apr-Jul Jan/Feb | Aug Jul/May | Sep-Dec Jul/Aug
+# Verified live against the engine's actually-held CUSIPs by validate() check C.
+def _expected_pairing(tenor, month):
+    """(TIPS_maturity_month, nominal_maturity_month) the desk rule expects for `month` (1-12),
+    or None if not pinned to a fixed pair for this tenor."""
+    m = month
+    if tenor == "30y":
+        return (2, 2)
+    if tenor == "5y":
+        return (4, 4) if 5 <= m <= 10 else (10, 10)
+    if tenor == "10y":
+        return {1: (7, 8), 2: (1, 11), 3: (1, 2), 8: (7, 5), 9: (7, 8)}.get(
+            m, (1, 2) if 4 <= m <= 7 else (7, 8))
+    return None
+
+
 def validate(tenor, cpi=None, gc=None):
-    """Permanent splice/day-count assertions (boss's two checks):
+    """Permanent splice/day-count/pairing assertions:
       A) sum d(t) tiles the settlement timeline exactly -- d(t) == settle(t)-settle(t-1) for
          every consecutive pair, so no calendar day is double-counted or dropped (covers the
          weekend re-dating and holiday handling in one check).
       B) every daily return is WITHIN a single bond -- on each roll day the new note's first
          return differences two marks OF THE NEW NOTE, both on/after its issue date (never a
          when-issued mark, never an old->new cross-CUSIP difference).
+      C) bond pairing matches the desk maturity-match table (_expected_pairing): for every
+         month both legs trade, the held TIPS & nominal maturity MONTHS equal the expected
+         closest-maturity pair (5y Apr/Apr & Oct/Oct, 30y Feb/Feb, the 10y staggered cycle).
     Returns (ok, messages)."""
     cpi = _macro()["cpi_nsa"] if cpi is None else cpi
     gc = gc_series() if gc is None else gc
@@ -323,8 +453,10 @@ def validate(tenor, cpi=None, gc=None):
     a = auctions.load_auctions().dropna(subset=["issueDate"])
     iss = {c: pd.Timestamp(v) for c, v in a.groupby("cusip")["issueDate"].min().items()}
     msgs, ok = [], True
+    leg_df = {}
     for leg in ("tips", "nominal"):
         d = leg_series(leg, tenor, cpi, gc)
+        leg_df[leg] = d
         if d.empty:
             continue
         # A) tiling: d(t) == (settle(t) - settle(prev row)).days for all rows after the first
@@ -348,6 +480,42 @@ def validate(tenor, cpi=None, gc=None):
             ok = False; msgs.append(f"  [B FAIL] {leg} {tenor}: {nbad} roll days difference a pre-issue/cross-bond mark")
         else:
             msgs.append(f"  [B ok]   {leg} {tenor}: every roll's first return is within-new-note, on/after issue")
+    # C) maturity-match pairing: month-end held CUSIP per leg -> compare maturity months to table.
+    # Hard-fail only on RECENT months (trailing 60 = the current auction regime the table
+    # describes). Older misses are reported, not failed: they reflect the then-current Treasury
+    # cadence (5y TIPS were one annual April issue before ~2019 -> Apr-maturing year-round; the
+    # 10y series' first months in 2003 predate the steady Jan/Jul clock), not a roll error.
+    t, u = leg_df.get("tips"), leg_df.get("nominal")
+    if t is not None and u is not None and not t.empty and not u.empty:
+        mat = _maturity_map()
+        tc = t["cusip"].groupby(t.index.to_period("M")).last()   # held into month-end (post-roll)
+        uc = u["cusip"].groupby(u.index.to_period("M")).last()
+        common = tc.index.intersection(uc.index)
+        recent_cut = common.max() - 60 if len(common) else None
+        bad, recent_bad, nchk = [], None, 0
+        for mp in common:
+            exp = _expected_pairing(tenor, mp.month)
+            tm, um = mat.get(tc[mp]), mat.get(uc[mp])
+            if exp is None or tm is None or um is None:
+                continue
+            nchk += 1
+            if (tm.month, um.month) != exp:
+                rec = mp > recent_cut
+                bad.append((mp, (tm.month, um.month), exp, tc[mp], uc[mp]))
+                if rec and recent_bad is None:
+                    recent_bad = bad[-1]
+        if recent_bad is not None:
+            ok = False
+            mp, got, exp, tcus, ucus = recent_bad
+            msgs.append(f"  [C FAIL] {tenor}: held pairing off the maturity-match table in {mp} "
+                        f"(got months {got} expected {exp}; held TIPS {tcus} / UST {ucus})")
+        elif bad:
+            msgs.append(f"  [C ok]   {tenor}: matches the desk pairing table for the current regime "
+                        f"({nchk - len(bad)}/{nchk} months); {len(bad)} older months "
+                        f"({bad[0][0]}..{bad[-1][0]}) follow the then-current auction cadence")
+        else:
+            msgs.append(f"  [C ok]   {tenor}: all {nchk} months match the desk maturity-pairing table "
+                        f"({str(common.min())}..{str(common.max())})")
     return ok, msgs
 
 

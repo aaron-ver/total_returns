@@ -6,6 +6,19 @@
 
 ---
 
+## As-built deltas (read this first)
+
+This file is the **mechanics/theory reference** (grounded in the Barclays primer). The shipped engine (`engine.py`) makes a few deliberate **desk choices** that specialize or replace the textbook construction in §5–§9. Where they differ, **`engine.py` and its docstrings are the source of truth**; the sections below are the conceptual backstop. The deltas:
+
+1. **DV01-normalized bp, not a notional-% return.** Each leg's daily number is `bp = (ΔV + coupon − financing) / DV01_denom`, where `DV01_denom` is that leg's own DV01 per 100 face fixed at the start of the month (the "100k DV01 per leg" sizing, `notional = 1e7/DV01`). The primer's `/V(t−1)` percentage return (§9.1 step 6) is **not** used — a breakeven is a DV01-weighted RV package, so both legs are put on equal DV01 and `r_BE = r_TIPS − r_UST` is the package's bp P&L. Recombine with any beta later as `r_TIPS − β·r_UST` (no rebuild).
+2. **Linear accumulation; no compounding, no coupon reinvestment, notional does not grow.** Cumulative series are a running **sum** of daily bp (`cumsum`), and the denominator resets to 100k DV01 at each month start. So §6.5 and §9.1 steps 4 & 7 (reinvest the coupon, compound the index) do **not** apply: the coupon is booked as cash on its pay date and the dirty-price drop offsets it.
+3. **GC mid for both legs; specialness out of scope.** Both legs finance at the same GC rate (GCFRTSY mid; USRG1T/fed funds extend it pre-2009). The repo bid/offer is a **tunable half-spread `x`** applied *linearly after* the build (`engine.apply_spread`, `financing.py`), not a pulled series — net financing on the package is ≈0 at the mid. The §7.3–§7.4 specialness drag is documented but **not modeled**.
+4. **Financing base is `V_prev`, not `V(t)`.** Repo accrues on the cash carried *into* the day: `fin = d/360 × GC × V_prev`. Using the literal `V(t)` of §5.2/§9.1 step 5 systematically over-charges a position whose value is growing.
+5. **T+1 settlement marking with calendar-day tiling.** Every observation is valued to its T+1 settlement; the day-count `d = settle(t) − settle(t−1)` lands the weekend/holiday carry on the day *before* the weekend (Fri `d=3`) and drives **both** accrual (via ΔV) and repo on the same day. `engine.validate` checks **A** (d tiles the timeline) and **B** (every roll's first return is within one bond) assert this.
+6. **Roll = issue-date-gated TIPS clock + maturity-matched nominal.** The "one monthly clock" of §9.2.1 is implemented as: roll the TIPS on the 1st business day of the month *after* a new-issue auction (5y May/Nov, 10y Feb/Aug, 30y Mar); the nominal leg is then the note whose maturity is the **closest most-recent match** to the OTR TIPS, held until a closer one issues (5y Apr/Apr & Oct/Oct, 30y Feb/Feb, the staggered 10y cycle in the §9.2.1 example). `engine.validate` check **C** verifies the held pairing against this table. (The simpler "newest auctioned" monthly schedule in `auctions.otr_schedule` is used only by the levels visualizer `visualize.py`, never by the return engine.)
+
+---
+
 ## 0. The whole pipeline in one picture
 
 For each reference bond, on each date `t`, the object you are building is:
@@ -246,6 +259,9 @@ A total-return swap receiver gets the asset's total return and pays `FFOIS ± sp
 ## 9. Building the series — step by step
 
 ### 9.1 Per-bond financed TR (each on-the-run 5y / 10y / 30y)
+
+> **As-built:** steps 4–7 are the textbook recipe. The engine instead books the coupon as cash (no reinvestment), finances on `V_prev` at **GC mid**, and reports a **DV01-normalized bp** return accumulated **linearly** — not `/V(t−1)`, not compounded. See "As-built deltas" at the top.
+
 For each date `t`:
 1. Build `DRI(t)` from published CPI (or seasonal projection past the certainty horizon); compute `IR(t)` (truncate6→round5).
 2. Get quoted clean real price (or solve from real yield); compute `AC(t)`, `P_dirty(t)`, `V(t) = IR(t)·P_dirty(t)`.
