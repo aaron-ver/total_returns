@@ -63,6 +63,8 @@ python engine.py validate                   :: permanent per-tenor checks: (A) d
                                             ::   within one bond, (C) held pairing matches the desk
                                             ::   maturity-match table (5y Apr/Apr,Oct/Oct; 30y Feb/Feb;
                                             ::   10y staggered cycle). Exits non-zero on failure.
+python engine.py seasonal                   :: build the auction-cycle bucket table -> cache/seasonal.parquet,
+                                            ::   then print QA (auction day-of-month, A0==A4[M-1] seam, clamp counts)
 :: output columns: r_TIPS_bp, r_UST_bp, r_BE_bp(=r_TIPS-r_UST), s_TIPS, s_UST (repo-spread
 ::   sensitivity: bp drag per 1bp half-spread), cum_* (linear-sum bp)
 :: each leg = financed LONG at GC mid; DV01 denominator set at the MONTHLY rebalance (100k DV01)
@@ -85,8 +87,10 @@ python export.py --no-update                :: export from the cached data as-is
 
 :: --- interactive HTML dashboard (recommended; instant, offline, no server) ---
 python dashboard.py                         :: refresh, then build dashboard.html and open it
+                                            ::   views: Chart | Table | SEASONAL (auction-cycle).
                                             ::   controls: tenor, repo x_TIPS/x_UST sliders, date range
-                                            ::   (Full/5y/1y/YTD), chart|table, monthly|daily, Download-CSV
+                                            ::   (Full/5y/1y/YTD), monthly|daily, Download-CSV; seasonal adds a
+                                            ::   TIPS/Nominal/Breakeven toggle + beta slider on Breakeven (TIPS-beta*UST).
                                             ::   all recompute is client-side JS -> no lag. Plotly embedded (offline).
 python dashboard.py --no-update             :: build from cached data (skip the Bloomberg pull)
 python dashboard.py --no-open               :: build but don't open the browser
@@ -118,6 +122,45 @@ python visualize.py
 - `visualize.py` — OTR-spliced charts with auction markers + returns chart (static PNGs)
 - `cache/` — parquet caches (git-ignored, regenerable)
 - `plots/` — generated PNGs (git-ignored)
+
+## Seasonal / auction-cycle analysis
+
+A pure **aggregation layer** over the engine's existing daily P&L (it does *not* recompute
+returns): sum the daily bp into auction-anchored within-month buckets, stack across years with
+the **median**. Built by `engine.seasonal_table` → `cache/seasonal.parquet`; surfaced in the
+dashboard's **Seasonal** view. `python engine.py seasonal` builds the table and prints QA.
+
+**Shared monthly auction calendar** — every calendar month carries exactly one TIPS auction (the
+tenor rotates Jan 10y, Feb 30y, Mar 10y, Apr 5y, … Dec 5y); that single auction anchors **all
+three** tenor series ("how each tenor trades around the monthly TIPS supply event"). Five
+trading-day anchors per month M: `A0` last TD of M−1, `A1` prev-TD on/before (auction−7d), `A2`
+auction, `A3` next-TD on/after (auction+7d), `A4` last TD of M. Four half-open buckets, boundary
+day to the left:
+
+| Period | Span (open, close] |
+|---|---|
+| P1 | A0 → A1  (month-start → auction−1w; long, low-signal by design) |
+| P2 | A1 → A2  (auction−1w → auction; includes the auction day) |
+| P3 | A2 → A3  (auction → auction+1w; strictly post-auction, starts T+1) |
+| P4 | A3 → A4  (auction+1w → month-end) |
+
+- **Clamps:** late auction (`A3 ≥ A4`) → `A3 = A4`, short P3 + **empty P4 (NaN)**; early auction
+  (`A1 ≤ A0`, only early-history front-of-month auctions) → **empty P1 (NaN)**, logged.
+- **Keystone table** (`engine.seasonal_table`): one tidy row per `(year, month, period, tenor)`
+  with `tips_pnl, ust_pnl` (bucket-**summed** leg P&L), `trading_days`, `clamped`. Every view —
+  48-bar seasonal, cumulative path, within-month signature, and all phase-2 groupings — is a
+  group-by on this one table.
+- **Metrics:** TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
+  75%; β = 100% is the plain DV01-matched breakeven). β is applied client-side per year-bucket
+  before the median, so the slider is instant. Units are the engine's **bp** (= $/100k-DV01 P&L;
+  ×$100k = dollars) — consistent with the Chart/Table views; the spec's "$/100k DV01" is the same
+  series ×100,000.
+- **Aggregation:** median across years per `(month, period)` with a 25–75th IQR band and `n`;
+  empty/clamped buckets drop out. The "within-month signature" pools each period across all
+  months to isolate the pure auction cycle.
+- **QA** (`python engine.py seasonal`): auction day-of-month range (early-clamp guard), seam
+  continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (the ±1-week
+  span) and `engine.tips_auction_calendar` (the anchor). Export integration is **phase 2**.
 
 ## Known limitations (by design, per desk)
 

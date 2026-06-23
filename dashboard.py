@@ -1,11 +1,23 @@
 """
 Build a self-contained interactive HTML dashboard for the breakeven return series.
 
-Why HTML: the repo bid/offer effect is LINEAR in the half-spread, so every recomputation
-(slider move, date range, tenor switch) is a trivial client-side vector op -> instant, no
-server, no lag. Plotly.js for charts (zoom/pan/hover), native HTML date pickers + range
-sliders, a clean CSS layout, a sortable raw-numbers table (daily or monthly), live net P&L,
-and a one-click CSV download of the current window.
+Why HTML: the repo bid/offer effect (and the seasonal β-hedge) is LINEAR in its parameter, so
+every recomputation (slider move, date range, tenor switch, β) is a trivial client-side vector
+op -> instant, no server, no lag. Plotly.js for charts (zoom/pan/hover), native HTML date
+pickers + range sliders, a clean CSS layout, a sortable raw-numbers table (daily or monthly),
+live net P&L, and a one-click CSV download of the current window.
+
+Three views (top-left toggle):
+  * Chart  -- cumulative long/short/mid breakeven net P&L (the repo half-spread sliders).
+  * Table  -- the same, as daily or monthly rows with a window total.
+  * Seasonal -- auction-cycle view (engine.seasonal_table). Every month is split into 4 periods
+    around its single TIPS auction (A0..A4, ±1 week; shared monthly auction calendar across all
+    three tenors), the engine's daily P&L is SUMMED per bucket, and buckets are stacked across
+    years with the MEDIAN (+ 25-75 IQR whiskers, n). Shown as 4 bars/calendar-month + a
+    cumulative seasonal path, plus a "within-month signature" (each period pooled across months).
+    Metric toggle TIPS / Nominal / Breakeven, with a β slider on Breakeven (= TIPS − β·UST;
+    β=100% is the plain DV01-matched breakeven, default 75%). Units are the engine's bp
+    (= $/100k-DV01 P&L; ×$100k = dollars). Late-/early-auction clamps -> empty buckets are NaN.
 
 Output: dashboard.html  (open in any browser; Plotly is embedded so it works offline).
 
@@ -29,13 +41,19 @@ PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
 
 def build_payload():
-    """Per tenor: only days where the breakeven is defined (both legs trading)."""
+    """Per tenor: daily leg returns (for Chart/Table) + the pre-bucketed seasonal keystone table
+    (engine.seasonal_table -> rows of year,month,period with the bucket-SUMMED leg P&L). The
+    Seasonal view aggregates this client-side — median across years, IQR band, n — as the
+    tenor/metric/β change. Empty/clamped buckets ship as null and are excluded from the median."""
+    st = engine.seasonal_table(save=True)
     data = {}
     for t in TENORS:
         p = os.path.join(engine.CACHE, f"returns_{t}.parquet")
         if not os.path.exists(p):
             continue
         d = engine.load_returns(t).dropna(subset=["r_BE_bp"])
+        s = st[st["tenor"] == t]
+        nn = lambda col: [None if pd.isna(v) else round(float(v), 4) for v in s[col]]
         data[t] = {
             "dates": [x.strftime("%Y-%m-%d") for x in d.index],
             "rT": [round(float(v), 4) for v in d["r_TIPS_bp"]],
@@ -43,6 +61,11 @@ def build_payload():
             "rBE": [round(float(v), 4) for v in d["r_BE_bp"]],
             "sT": [round(float(v), 6) for v in d["s_TIPS"]],
             "sU": [round(float(v), 6) for v in d["s_UST"]],
+            "seas": {                                  # keystone bucket table (this tenor)
+                "y": [int(v) for v in s["year"]], "m": [int(v) for v in s["month"]],
+                "p": [int(v) for v in s["period"]], "t": nn("tips_pnl"), "u": nn("ust_pnl"),
+                "d": [int(v) for v in s["trading_days"]], "c": [bool(v) for v in s["clamped"]],
+            },
         }
     if not data:
         raise SystemExit("No returns_*.parquet — run:  python engine.py")
@@ -98,31 +121,41 @@ __PLOTLY__
   .pos{color:var(--green)}.neg{color:var(--red)}
   .note{color:var(--muted);font-size:11px;padding:6px 18px}
   .hl{color:var(--accent)}
+  #seaswrap{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 10px 8px}
+  #seastop{flex:1.7;min-height:0}#seassig{flex:1;min-height:0}
+  .grp.off{opacity:.4}
 </style></head>
 <body><div class="app">
   <div class="side">
     <h1>Breakeven financed TR</h1>
     <div class="grp"><label>Tenor</label><div class="seg" id="tenor"></div></div>
-    <div class="grp"><label>Repo half-spread x_TIPS <span class="hl" id="xtv">3.0</span> bp</label>
+    <div class="grp rv"><label>Repo half-spread x_TIPS <span class="hl" id="xtv">3.0</span> bp</label>
       <input type="range" id="xt" min="0" max="25" step="0.5" value="3"></div>
-    <div class="grp"><label>Repo half-spread x_UST <span class="hl" id="xuv">3.0</span> bp</label>
+    <div class="grp rv"><label>Repo half-spread x_UST <span class="hl" id="xuv">3.0</span> bp</label>
       <input type="range" id="xu" min="0" max="25" step="0.5" value="3"></div>
-    <div class="grp"><label>Date range</label>
+    <div class="grp rv"><label>Date range</label>
       <div class="row"><input type="date" id="start"></div>
       <div class="row"><input type="date" id="end"></div>
       <div class="seg" id="range" style="margin-top:6px"><button data-range="full">Full</button>
         <button data-range="5y">5y</button><button data-range="1y">1y</button><button data-range="ytd">YTD</button></div></div>
     <div class="grp"><label>View</label><div class="seg" id="view">
-      <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button></div></div>
-    <div class="grp"><label>Table frequency</label><div class="seg" id="freq">
+      <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button>
+      <button data-view="seasonal">Seasonal</button></div></div>
+    <div class="grp rv"><label>Table frequency</label><div class="seg" id="freq">
       <button data-freq="monthly" class="on">Monthly</button><button data-freq="daily">Daily</button></div></div>
-    <button class="act" id="dl">Download CSV (window)</button>
+    <div class="grp sv" style="display:none"><label>Seasonal metric</label><div class="seg" id="smetric">
+      <button data-smetric="tips" class="on">TIPS</button><button data-smetric="nom">Nominal</button>
+      <button data-smetric="be">Breakeven</button></div></div>
+    <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">75</span>%
+      &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 plain)</span></label>
+      <input type="range" id="beta" min="0" max="150" step="5" value="75"></div>
+    <button class="act rv" id="dl">Download CSV (window)</button>
     <p class="note">Long-BE = long TIPS / short UST. Both directions carry the slippage
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
       Specialness not modeled. Full hand-replication data: <code>python export.py</code>.</p>
   </div>
   <div class="main">
-    <div class="totals">
+    <div class="totals rv">
       <div class="tot l"><span class="lab">long breakeven</span><b id="tl">+0</b> bp</div>
       <div class="tot s"><span class="lab">short breakeven</span><b id="ts">+0</b> bp</div>
       <div class="tot m"><span class="lab">mid (x=0)</span><b id="tm">+0</b> bp</div>
@@ -130,12 +163,21 @@ __PLOTLY__
     </div>
     <div id="chart"></div>
     <div class="tablewrap" id="tablewrap" style="display:none"><table id="tbl"></table><div class="note" id="tnote"></div></div>
+    <div id="seaswrap" style="display:none">
+      <div class="note" id="seascap"></div>
+      <div id="seastop"></div>
+      <div class="note" style="padding-top:10px"><b>Within-month signature</b> — the four periods averaged across all 12 months (isolates the auction cycle):</div>
+      <div id="seassig"></div>
+    </div>
   </div>
 </div>
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75};
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];
+const PLAB=["P1 · prev m/e → auction−1w","P2 · auction−1w → auction","P3 · auction → auction+1w","P4 · auction+1w → m/e"];
 const $ = id => document.getElementById(id);
 const fmt = (x,d=1) => (x>=0?"+":"") + x.toFixed(d);
 const cls = x => x>=0?"pos":"neg";
@@ -168,13 +210,23 @@ function monthly(s){
   }
   return ord.map(m=>[m,...map[m]]);
 }
+function applyView(){
+  const seasonal = S.view==="seasonal";
+  document.querySelectorAll(".rv").forEach(e=>e.style.display=seasonal?"none":"");
+  document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
+  $("betagrp").classList.toggle("off", seasonal && S.smetric!=="be");   // β only acts on Breakeven
+  $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
+  $("tablewrap").style.display=(!seasonal && S.view==="table")?"":"none";
+  $("seaswrap").style.display=seasonal?"":"none";
+}
 function render(){
+  applyView();
+  if(S.view==="seasonal"){ drawSeasonal(); return; }
   const s = series();
   const last = a => a.length?a[a.length-1]:0;
   $("tl").textContent=fmt(last(s.cL),0); $("ts").textContent=fmt(last(s.cS),0); $("tm").textContent=fmt(last(s.cM),0);
   $("twin").textContent = s.dates.length ? (s.dates[0]+"  →  "+s.dates[s.dates.length-1]+"  ("+s.dates.length+" days)") : "—";
-  if(S.view==="chart"){ $("chart").style.display=""; $("tablewrap").style.display="none"; drawChart(s); }
-  else { $("chart").style.display="none"; $("tablewrap").style.display=""; drawTable(s); }
+  if(S.view==="chart"){ drawChart(s); } else { drawTable(s); }
 }
 let _raf=0;                                  // coalesce re-renders to one per animation frame: the
 function scheduleRender(){                    // slider handler then returns instantly (so the thumb
@@ -189,6 +241,62 @@ function drawChart(s){
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}};
   Plotly.react("chart",data,layout,{responsive:true,displaylogo:false});
+}
+function median(a){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),n=b.length,h=n>>1; return n%2?b[h]:(b[h-1]+b[h])/2; }
+function quantile(a,q){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),pos=(b.length-1)*q,lo=Math.floor(pos); return b[lo]+((b[lo+1]??b[lo])-b[lo])*(pos-lo); }
+function seasonalAgg(){
+  // Pure group-by on the keystone bucket table: per (year,month,period) we have the bucket-SUMMED
+  // leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=t-(β/100)·u. Stack across YEARS with the
+  // median per (month,period); carry IQR (q25..q75) and n. Empty/clamped buckets (null) drop out.
+  const sd=DATA[S.tenor].seas, beta=S.beta/100;
+  const valOf=i=>{ const t=sd.t[i],u=sd.u[i];
+    if(S.smetric==="tips")return t; if(S.smetric==="nom")return u;
+    return (t==null||u==null)?null:t-beta*u; };
+  const byMP={}, byP={1:[],2:[],3:[],4:[]}, clMP={};
+  for(let i=0;i<sd.y.length;i++){ const v=valOf(i); if(v==null)continue;
+    const m=sd.m[i],p=sd.p[i],k=(m-1)*4+(p-1);
+    (byMP[k]=byMP[k]||[]).push(v); byP[p].push(v); if(sd.c[i])clMP[k]=(clMP[k]||0)+1; }
+  const med=[[],[],[],[]],q1=[[],[],[],[]],q3=[[],[],[],[]],ns=[[],[],[],[]],clamp=[[],[],[],[]];
+  for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const k=m*4+p, arr=byMP[k]||[];
+    med[p][m]=median(arr); q1[p][m]=quantile(arr,0.25); q3[p][m]=quantile(arr,0.75);
+    ns[p][m]=arr.length; clamp[p][m]=clMP[k]||0; }
+  const cum=[]; let c=0;                                       // cumulative seasonal path (Σ medians)
+  for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const v=med[p][m]; if(v!=null)c+=v; cum.push(c); }
+  const sig=[1,2,3,4].map(p=>median(byP[p])), sq1=[1,2,3,4].map(p=>quantile(byP[p],0.25)),
+        sq3=[1,2,3,4].map(p=>quantile(byP[p],0.75)), sn=[1,2,3,4].map(p=>byP[p].length);
+  return {med,q1,q3,ns,clamp,cum,sig,sq1,sq3,sn};
+}
+const MNAME={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
+function drawSeasonal(){
+  const a=seasonalAgg();
+  const barTr=[0,1,2,3].map(p=>({type:"bar",name:PLAB[p],x:MONTHS.map((_,m)=>m*4+p),y:a.med[p],
+    marker:{color:PCOL[p]},width:0.92,
+    error_y:{type:"data",symmetric:false,array:a.med[p].map((v,m)=>v==null?0:a.q3[p][m]-v),
+             arrayminus:a.med[p].map((v,m)=>v==null?0:v-a.q1[p][m]),color:"rgba(230,237,243,.28)",thickness:1,width:0},
+    customdata:MONTHS.map((mm,m)=>[mm,a.ns[p][m],a.q1[p][m],a.q3[p][m]]),
+    hovertemplate:"%{customdata[0]} · P"+(p+1)+"<br>median %{y:+.2f} bp  (IQR %{customdata[2]:+.2f}..%{customdata[3]:+.2f}, n=%{customdata[1]})<extra></extra>"}));
+  const cumTr={type:"scatter",mode:"lines",name:"cumulative (Σ medians)",yaxis:"y2",
+    x:a.cum.map((_,i)=>i),y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.1f} bp<extra></extra>"};
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  Plotly.react("seastop",[...barTr,cumTr],{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},
+    barmode:"overlay",title:{text:S.tenor+" — "+mname+" per auction-cycle period (median bp over years)",font:{size:13}},
+    xaxis:{tickvals:MONTHS.map((_,m)=>m*4+1.5),ticktext:MONTHS,gridcolor:"#2d3a48",range:[-0.6,47.6]},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period median (bp)"},
+    yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
+    hovermode:"closest",legend:{orientation:"h",y:1.14,font:{size:10}}},{responsive:true,displaylogo:false});
+  Plotly.react("seassig",[{type:"bar",x:["P1","P2","P3","P4"],y:a.sig,marker:{color:PCOL},width:0.6,
+    error_y:{type:"data",symmetric:false,array:a.sig.map((v,p)=>v==null?0:a.sq3[p]-v),
+             arrayminus:a.sig.map((v,p)=>v==null?0:v-a.sq1[p]),color:"rgba(230,237,243,.4)",thickness:1.2,width:4},
+    customdata:PLAB.map((l,p)=>[l,a.sn[p]]),hovertemplate:"%{customdata[0]}<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"}],{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"median (bp)"},xaxis:{gridcolor:"#2d3a48"}},
+    {responsive:true,displaylogo:false});
+  const desc=S.smetric==="be"?("<b>Breakeven = TIPS − "+S.beta+"%·UST</b> (β=100% is the plain DV01-matched breakeven)")
+                             :("<b>"+MNAME[S.smetric]+"</b> leg");
+  $("seascap").innerHTML="Showing "+desc+" per auction-cycle period. Bars = <b>median across years</b> of the bucket-summed P&L"
+    +" (bp on 100k DV01; ×$100k = $); whiskers = 25–75th pctile; gold = cumulative seasonal path."
+    +" Each month split around its single TIPS auction (A0..A4, ±1w); late-clamped P3/empty P4 shown with smaller n.";
 }
 function drawTable(s){
   const cols=["period","TIPS","UST","BEmid","longBE","shortBE"];
@@ -223,9 +331,10 @@ const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("but
   if(t===S.tenor)b.classList.add("on"); tenWrap.appendChild(b);});
 tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.tenor;
   tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render();});
-seg("view","view"); seg("freq","freq");
+seg("view","view"); seg("freq","freq"); seg("smetric","smetric");
 $("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); scheduleRender();};
 $("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); scheduleRender();};
+$("beta").oninput=e=>{S.beta=+e.target.value; $("betav").textContent=S.beta; scheduleRender();};
 function setRangeBtn(name){ document.querySelectorAll("#range button").forEach(x=>x.classList.toggle("on", x.dataset.range===name)); }
 $("start").onchange=e=>{S.start=e.target.value||null; setRangeBtn(null); render();};
 $("end").onchange=e=>{S.end=e.target.value||null; setRangeBtn(null); render();};

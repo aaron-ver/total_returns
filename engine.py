@@ -546,6 +546,150 @@ def apply_spread(df, xT=0.0, xU=0.0):
     return out
 
 
+# ===========================================================================================
+# Seasonal auction-cycle bucketing (desk spec). A pure AGGREGATION layer over the engine's
+# existing daily P&L -- it does NOT recompute returns. We sum the existing daily bp (the
+# DV01-normalized P&L per 100k DV01; $ P&L = bp x 100,000) into auction-anchored within-month
+# buckets, then stack across years with the MEDIAN.
+#
+# Shared monthly calendar (spec sec.5): every calendar month carries exactly ONE TIPS auction
+# (the tenor rotates Jan 10y / Feb 30y / Mar 10y / Apr 5y / ... / Dec 5y); that single auction
+# anchors ALL THREE tenor series. Read: "how each tenor trades around the monthly TIPS supply
+# event." (Early history has a few 2-auction months -> earliest used, logged.)
+#
+# Five trading-day anchors per month M (sec.2), on the shared bond-market calendar:
+#   A0 last TD of M-1   A1 prev-TD on/before (auction - 7 cal days)   A2 auction
+#   A3 next-TD on/after (auction + 7 cal days)                        A4 last TD of M
+# Four half-open buckets (open, close]; a boundary day's P&L belongs to the bucket on its LEFT:
+#   P1 (A0,A1]  P2 (A1,A2]  P3 (A2,A3]  P4 (A3,A4]   (P2 includes the auction day; P3 starts T+1)
+# Clamps (sec.3): late A3>=A4 -> A3=A4 (P4 empty, NaN); early A1<=A0 -> A1=A0 (P1 empty, NaN +
+#   logged -- only fires for some early-history front-of-month auctions; modern auctions sit in
+#   the back half so it is otherwise inert).
+SEASONAL_WEEK = 7              # "1 week" around the auction, in CALENDAR days
+PERIOD_SPAN = {1: "P1 · m/e→auction−1w", 2: "P2 · auction−1w→auction",
+               3: "P3 · auction→auction+1w", 4: "P4 · auction+1w→m/e"}
+
+
+_TIPS_AUCT = None
+def tips_auction_calendar():
+    """{(year, month): auction Timestamp} -- the single monthly TIPS auction shared across tenors
+    (new issues AND reopenings; the tenor rotates). If a month carries >1 TIPS auction the
+    earliest is used (logged once); months with none are absent (those months can't be bucketed)."""
+    global _TIPS_AUCT
+    if _TIPS_AUCT is None:
+        a = auctions.load_auctions()
+        s = a[a["leg"] == "tips"].dropna(subset=["auctionDate"])
+        cal, multi = {}, []
+        for d in sorted(pd.to_datetime(s["auctionDate"]).unique()):
+            d = pd.Timestamp(d); ym = (d.year, d.month)
+            (multi.append(ym) if ym in cal else cal.setdefault(ym, d))
+        if multi:
+            print(f"  [seasonal] {len(multi)} month(s) had >1 TIPS auction; earliest used (e.g. {multi[0]})")
+        _TIPS_AUCT = cal
+    return _TIPS_AUCT
+
+
+def _last_trading_day(year, month, cal):
+    end = pd.Timestamp(year, month, 1) + pd.offsets.MonthEnd(0)
+    return cal[cal.searchsorted(end, side="right") - 1]
+
+
+def month_anchors(year, month, cal=None, auction=None):
+    """(A0,A1,A2,A3,A4, clamped, kind) for (year, month), or None if no auction that month.
+    kind in {None,'late','early'}; both clamp actions still apply if (degenerately) both fire."""
+    cal = trading_calendar() if cal is None else cal
+    if auction is None:
+        auction = tips_auction_calendar().get((year, month))
+        if auction is None:
+            return None
+    A2 = pd.Timestamp(auction)
+    pm = pd.Timestamp(year, month, 1) - pd.offsets.MonthBegin(1)
+    A0 = _last_trading_day(pm.year, pm.month, cal)
+    A4 = _last_trading_day(year, month, cal)
+    A1 = cal[cal.searchsorted(A2 - pd.Timedelta(days=SEASONAL_WEEK), side="right") - 1]   # prev TD on/before
+    A3 = cal[min(cal.searchsorted(A2 + pd.Timedelta(days=SEASONAL_WEEK), side="left"), len(cal) - 1)]  # next TD on/after
+    late, early = A3 >= A4, A1 <= A0
+    if late:
+        A3 = A4                                   # P4 empties
+    if early:
+        A1 = A0                                   # P1 empties (defensive)
+    kind = "early" if early else ("late" if late else None)
+    return A0, A1, A2, A3, A4, (late or early), kind
+
+
+def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
+    """The keystone tidy long table (spec sec.7), one row per (year, month, period, tenor):
+      tips_pnl, ust_pnl  -- SUM of the engine's daily bp (DV01-normalized P&L) inside the bucket
+      trading_days       -- # days summed (0 -> empty/clamped bucket; pnl recorded NaN)
+      clamped            -- the month hit a clamp (short P3 / empty P4, or empty P1)
+    The 48-bar seasonal, cumulative path, within-month signature and every phase-2 grouping are
+    group-bys on this one table. Beta-hedged breakeven is derived downstream as tips - beta*ust
+    (beta fixed within a month, so sum-then-scale == scale-then-sum)."""
+    cal = trading_calendar()
+    aucs = tips_auction_calendar()
+    rows, early_hits = [], []
+    for ten in tenors:
+        try:
+            r = load_returns(ten)
+        except Exception:
+            continue
+        idx = r.index
+        for (y, m), sub in r.groupby([idx.year, idx.month]):
+            anc = month_anchors(int(y), int(m), cal, aucs.get((int(y), int(m))))
+            if anc is None:
+                continue                          # no TIPS auction that month -> unbucketable
+            _A0, A1, A2, A3, _A4, clamped, kind = anc
+            if kind == "early":
+                early_hits.append((ten, int(y), int(m)))
+            d = sub.index
+            per = np.where(d <= A1, 1, np.where(d <= A2, 2, np.where(d <= A3, 3, 4)))
+            for p in (1, 2, 3, 4):
+                mask = per == p
+                td = int(mask.sum())
+                if td == 0:
+                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, 0, bool(clamped)))
+                else:
+                    rows.append((int(y), int(m), p, ten, float(sub["r_TIPS_bp"].to_numpy()[mask].sum()),
+                                 float(sub["r_UST_bp"].to_numpy()[mask].sum()), td, bool(clamped)))
+    df = pd.DataFrame(rows, columns=["year", "month", "period", "tenor",
+                                     "tips_pnl", "ust_pnl", "trading_days", "clamped"])
+    if early_hits:
+        print(f"  [seasonal] early-auction clamp fired {len(early_hits)}x (front-of-month auctions, "
+              f"e.g. {early_hits[0]}); P1 recorded empty for those months")
+    if save:
+        df.to_parquet(os.path.join(CACHE, "seasonal.parquet"))
+    return df
+
+
+def seasonal_qa(tenors=("5y", "10y", "30y")):
+    """Spec sec.9 QA: auction day-of-month range (early-clamp guard), seam continuity
+    A0[M]==A4[M-1], and counts of clamped short-P3 / empty-P4 buckets. Returns (ok, messages)."""
+    cal = trading_calendar()
+    aucs = tips_auction_calendar()
+    msgs, ok = [], True
+    doms = [d.day for d in aucs.values()]
+    msgs.append(f"  auctions: {len(aucs)} months  day-of-month min={min(doms)} max={max(doms)} "
+                f"(early clamp only when an auction lands within ~1w of month start)")
+    bad = 0
+    for (y, m) in sorted(aucs):
+        pm = pd.Timestamp(y, m, 1) - pd.offsets.MonthBegin(1)
+        if (pm.year, pm.month) not in aucs:
+            continue
+        a = month_anchors(y, m, cal, aucs[(y, m)]); ap = month_anchors(pm.year, pm.month, cal, aucs[(pm.year, pm.month)])
+        if a and ap and a[0] != ap[4]:
+            bad += 1
+    if bad:
+        ok = False; msgs.append(f"  [seam FAIL] A0[M] != A4[M-1] in {bad} month(s)")
+    else:
+        msgs.append("  [seam ok] A0[M] == A4[M-1] for every month")
+    df = seasonal_table(tenors, save=False)
+    late = int(((df.period == 4) & df.trading_days.eq(0)).sum())     # empty P4 <=> late clamp <=> short P3
+    early = int(((df.period == 1) & df.trading_days.eq(0)).sum())    # empty P1 <=> early clamp
+    msgs.append(f"  late-clamped months (short P3 + empty-P4 NaN): {late}   "
+                f"early-clamped (empty-P1 NaN): {early}   of {len(df)//4} month-tenor buckets")
+    return ok, msgs
+
+
 def window_table(tenor, start=None, end=None, xT=0.0, xU=0.0, freq="auto"):
     """Raw daily/monthly returns over a window. Returns (table, totals):
       - span <= 45 days (or freq='D') -> one row per day;
@@ -583,6 +727,14 @@ if __name__ == "__main__":
             print(f"=== validate {ten} ==="); [print(m) for m in msgs]
         print("\nALL PASS" if all_ok else "\nFAILURES PRESENT")
         sys.exit(0 if all_ok else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "seasonal":
+        # python engine.py seasonal  -> build the tidy bucket table + run QA
+        df = seasonal_table(save=True)
+        print(f"=== seasonal table: {len(df)} rows -> cache/seasonal.parquet ===")
+        print(df.groupby("tenor")["trading_days"].agg(["count", "sum"]).to_string())
+        ok, msgs = seasonal_qa()
+        print("=== seasonal QA ==="); [print(m) for m in msgs]
+        sys.exit(0 if ok else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "window":
         # python engine.py window <tenor> [start] [end] [xT] [xU]
         a = sys.argv
