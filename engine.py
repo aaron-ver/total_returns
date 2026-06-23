@@ -125,6 +125,16 @@ def _first_bday_on_or_after(ts):
     return cal[i] if i < len(cal) else None
 
 
+_ISS = None
+def _issue_dates():
+    """Original (earliest) issue date per CUSIP — NOT a later reopening date."""
+    global _ISS
+    if _ISS is None:
+        a = auctions.load_auctions().dropna(subset=["issueDate"])
+        _ISS = {c: pd.Timestamp(v) for c, v in a.groupby("cusip")["issueDate"].min().items()}
+    return _ISS
+
+
 def _next_bday(ts):
     """Next business day (T+1) on the bond-market calendar — the settlement date."""
     cal = trading_calendar()
@@ -191,11 +201,21 @@ def leg_series(leg, tenor, cpi, gc):
     events = roll_schedule(leg, tenor)
     if not events:
         return pd.DataFrame()
-    # Roll at CLOSE: the held bond switches the business day AFTER the roll date, so the new
-    # note's FIRST return is its first full held day (entry mark -> next day) -- never a
-    # when-issued move and never an old->new cross-bond difference. The old note covers the
-    # roll date's return.
-    eff = [_next_bday(e[0]) for e in events]; ecus = [e[1] for e in events]
+    # Return-effective roll date = max(roll date, next b-day after the new bond's issue date).
+    # The new bond's FIRST return uses its ISSUE-DATE close as the prior mark (never a
+    # when-issued, pre-issue mark; never an old->new cross-CUSIP difference); the old bond
+    # covers the roll date's return whenever the new bond is issued ON the roll date.
+    #   - TIPS / 5y / 30y nominal: issue is month-end, roll is the next b-day, so eff = roll
+    #     date -> e.g. May 1 return = new(May1) - new(Apr30 issue close).  [old bond holds Apr30]
+    #   - 10y nominal (staggered): new note is issued ON the roll date (the 15th) with only a
+    #     when-issued prior, so eff = issue+1 -> first return = issue -> issue+1.
+    iss = _issue_dates()
+    pairs = sorted((max(pd.Timestamp(e), _next_bday(iss[c])) if c in iss else pd.Timestamp(e), c)
+                   for e, c in events)
+    eff, ecus = [], []
+    for adj, c in pairs:                                   # drop consecutive duplicate cusips
+        if not ecus or ecus[-1] != c:
+            eff.append(adj); ecus.append(c)
     packs = {}
     for c in set(ecus):
         p = _bond_pack(c, leg, cpi)
