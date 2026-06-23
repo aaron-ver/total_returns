@@ -191,7 +191,11 @@ def leg_series(leg, tenor, cpi, gc):
     events = roll_schedule(leg, tenor)
     if not events:
         return pd.DataFrame()
-    eff = [e[0] for e in events]; ecus = [e[1] for e in events]
+    # Roll at CLOSE: the held bond switches the business day AFTER the roll date, so the new
+    # note's FIRST return is its first full held day (entry mark -> next day) -- never a
+    # when-issued move and never an old->new cross-bond difference. The old note covers the
+    # roll date's return.
+    eff = [_next_bday(e[0]) for e in events]; ecus = [e[1] for e in events]
     packs = {}
     for c in set(ecus):
         p = _bond_pack(c, leg, cpi)
@@ -284,6 +288,63 @@ def load_returns(tenor):
     return pd.read_parquet(os.path.join(CACHE, f"returns_{tenor}.parquet"))
 
 
+def validate(tenor, cpi=None, gc=None):
+    """Permanent splice/day-count assertions (boss's two checks):
+      A) sum d(t) tiles the settlement timeline exactly -- d(t) == settle(t)-settle(t-1) for
+         every consecutive pair, so no calendar day is double-counted or dropped (covers the
+         weekend re-dating and holiday handling in one check).
+      B) every daily return is WITHIN a single bond -- on each roll day the new note's first
+         return differences two marks OF THE NEW NOTE, both on/after its issue date (never a
+         when-issued mark, never an old->new cross-CUSIP difference).
+    Returns (ok, messages)."""
+    cpi = _macro()["cpi_nsa"] if cpi is None else cpi
+    gc = gc_series() if gc is None else gc
+    # ORIGINAL issue date per cusip (earliest; NOT a later reopening date)
+    a = auctions.load_auctions().dropna(subset=["issueDate"])
+    iss = {c: pd.Timestamp(v) for c, v in a.groupby("cusip")["issueDate"].min().items()}
+    msgs, ok = [], True
+    for leg in ("tips", "nominal"):
+        d = leg_series(leg, tenor, cpi, gc)
+        if d.empty:
+            continue
+        # A) tiling: d(t) == (settle(t) - settle(prev row)).days for all rows after the first
+        gap = (d["settle"] - d["settle"].shift()).dt.days
+        bad = d.index[1:][(d["days"].iloc[1:].to_numpy() != gap.iloc[1:].to_numpy())]
+        if len(bad):
+            ok = False; msgs.append(f"  [A FAIL] {leg} {tenor}: {len(bad)} rows where d != settle gap (e.g. {bad[0].date()})")
+        else:
+            msgs.append(f"  [A ok]   {leg} {tenor}: d tiles settlement timeline ({len(d)} rows, sum d={int(d['days'].sum())})")
+        # B) within-bond: on each roll, the prior mark used is the SAME (new) cusip, on/after issue
+        nbad = 0
+        for t in d.index[d["is_roll"].fillna(False).to_numpy()]:
+            c = d.at[t, "cusip"]; m = packs_idx(c)
+            if m is None or t not in m:
+                nbad += 1; continue
+            il = m.get_loc(t)
+            prior = m[il - 1] if il > 0 else None
+            if prior is None or (c in iss and prior < iss[c]):    # would be a WI / pre-entry mark
+                nbad += 1
+        if nbad:
+            ok = False; msgs.append(f"  [B FAIL] {leg} {tenor}: {nbad} roll days difference a pre-issue/cross-bond mark")
+        else:
+            msgs.append(f"  [B ok]   {leg} {tenor}: every roll's first return is within-new-note, on/after issue")
+    return ok, msgs
+
+
+_PIDX = {}
+def packs_idx(cusip):
+    """Cached daily price index for a cusip (the bond's own trading days)."""
+    if cusip not in _PIDX:
+        p = os.path.join(CACHE, "daily", f"{cusip}.parquet")
+        if not os.path.exists(p):
+            _PIDX[cusip] = None
+        else:
+            df = pd.read_parquet(p)
+            df = df[["PX_CLEAN_MID"]].dropna() if "PX_CLEAN_MID" in df else df
+            _PIDX[cusip] = df.index if len(df) else None
+    return _PIDX[cusip]
+
+
 def apply_spread(df, xT=0.0, xU=0.0):
     """Add long/short breakeven daily bp at the given repo half-spreads (bp).
     Both directions carry the slippage drag (long pays GC+x, short earns GC-x)."""
@@ -326,6 +387,14 @@ def window_table(tenor, start=None, end=None, xT=0.0, xU=0.0, freq="auto"):
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] == "validate":
+        cpi = _macro()["cpi_nsa"]; gc = gc_series(); all_ok = True
+        for ten in ["5y", "10y", "30y"]:
+            okt, msgs = validate(ten, cpi, gc)
+            all_ok = all_ok and okt
+            print(f"=== validate {ten} ==="); [print(m) for m in msgs]
+        print("\nALL PASS" if all_ok else "\nFAILURES PRESENT")
+        sys.exit(0 if all_ok else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "window":
         # python engine.py window <tenor> [start] [end] [xT] [xU]
         a = sys.argv
