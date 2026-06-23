@@ -1,54 +1,61 @@
 # Breakeven total-return export — column key
 
-One sheet per tenor (5y / 10y / 30y), one row per **business day**. Each leg is a financed
-**long** (the TIPS leg and the UST/nominal leg); the breakeven is their difference.
-All prices are per 100 face; returns are in **bp**.
+One sheet per tenor (5y / 10y / 30y), one row per **business day** (the value date). Each leg is
+a financed **long**; the breakeven is their difference. Prices per 100 face; returns in **bp**.
 
-### Identifiers / shared
+### Date / day-count
 | Column | Meaning |
 |---|---|
-| `date` | Business day. The row's return is for *prior business day → this day*. |
-| `TIPS_cusip`, `UST_cusip` | The on-the-run bond each leg tracks that day (rolls on the 1st business day of each month). |
-| `gc_repo` | GC repo financing rate that day, % (DTCC GCF Treasury `GCFRTSY`; before 2009 uses overnight GC / fed funds). |
+| `date` | Business day / value date. The return is for *prior business day → this day*. |
+| `settlement_date` | T+1 business day (bond-market calendar) — informational. |
+| `d` | Calendar days the position is held & financed since the prior business day (**1** normal, **3** Fri→Mon, **4+** holidays). Both accrual (via ΔV) and repo scale with `d`. |
+| `gc_repo` | GC financing rate that day, % (GCFRTSY; USRG1T/fed funds before 2009). |
 
-### Per leg — prefix `TIPS_` (real) and `UST_` (nominal)
+### Per leg — `TIPS_` (real) and `UST_` (nominal)
 | Column | Meaning |
 |---|---|
-| `*_clean` | Quoted clean price (real for TIPS), per 100 — Bloomberg. |
-| `*_yield` | Yield to maturity, % (real for TIPS, nominal for UST) — Bloomberg. |
-| `*_accrued` | Accrued interest per 100 (computed, actual/actual). |
-| `TIPS_IR` | Index ratio = reference CPI / base CPI (inflation uplift). `UST_IR` = 1. |
-| `*_dirty_real` / `UST_dirty` | `clean + accrued`. |
-| `*_V` | **Cash value** = `dirty × IR` (the actual $ exposure per 100 face; for UST, = dirty). |
-| `*_DV01` | $ change in `V` per 1 bp yield move, per 100 face (our calc; real-yield DV01 × IR for TIPS). |
-| `*_denom` | The DV01 used as the return denominator — fixed at the **monthly 100k-DV01 rebalance** (constant within the month). |
-| `*_dV` | `V − V_prev`, same bond (never across a roll). |
-| `*_coupon` | Coupon cash booked that day (TIPS = ½·coupon × IR; paid when a coupon date passes). |
-| `*_days` | Calendar days since prior business day (for act/360 financing). |
-| `*_financing` | `days/360 × gc_repo/100 × V_prev` (cost of financing the position). |
-| `*_pnl` | `dV + coupon − financing` — daily $ P&L per 100 face. |
-| `r_TIPS_bp`, `r_UST_bp` | Leg daily return in bp = `pnl / denom` (DV01-normalized to 100k per leg). |
+| `*_cusip` | On-the-run bond the leg tracks (issue-date-gated, TIPS-auction-clock roll). |
+| `*_notional` | Face giving 100k DV01 = `1e7 / DV01` (set at the monthly reset, held all month). |
+| `*_DV01` | Sizing DV01 per 100 face — **our** calc (real-yield×IR for TIPS; not BBG's TIPS risk, which is ~½). Set at the monthly reset, held constant → it is the bp denominator. |
+| `V_tips` / `V_nom` | Cash value per 100 face: TIPS = `dirty_real × IR`; UST = `dirty`. |
+| `TIPS_dirty_real` / `UST_dirty` | `clean + accrued`. |
+| `TIPS_IR` | Index ratio = DRI / base CPI (from CPI, matches Treasury to 1e-6). UST IR = 1. |
+| `*_clean` | Quoted clean price per 100 (Bloomberg PX_CLEAN_MID). |
+| `*_gross_bp` | Leg price+coupon return *before* financing = `(ΔV + coupon) / DV01`. |
+| `*_fin_bp` | Leg financing drag (bp) at GC mid = `(d/360 × gc/100 × V_prev) / DV01`. |
+| `r_TIPS_bp` / `r_UST_bp` | Leg net daily return = `gross_bp − fin_bp`. |
 
-### Output
+### Breakeven
 | Column | Meaning |
 |---|---|
-| `r_BE_bp` | Breakeven daily return = `r_TIPS_bp − r_UST_bp` (long TIPS / short UST). |
-| `cum_TIPS_bp`, `cum_UST_bp`, `cum_BE_bp` | Running **cumulative** (linear sum of daily bp — **not** compounded). |
+| `net_financing_bp` | `TIPS_fin_bp − UST_fin_bp` (long TIPS pays, short UST earns; GC mid). |
+| `r_BE_bp` | Net breakeven daily return = `r_TIPS_bp − r_UST_bp`. |
+| `cum_TIPS_bp` / `cum_UST_bp` / `cum_BE_bp` | Running **linear** sum of daily bp (not compounded). |
 
-### Replication chain (every input is in the row)
+### Flags
+| Column | Meaning |
+|---|---|
+| `is_roll_day` | Either leg switched CUSIP that day. |
+| `is_coupon_day` | A coupon paid on either leg that day. |
+| `is_weekend_or_holiday_step` | `d > 1` (step spans a weekend/holiday). |
+
+### Replication chain (hand-check any day)
 ```
-dirty   = clean + accrued
-V       = dirty × IR                         (UST: IR = 1)
-dV      = V − V_prev                          (same bond)
-financing = days/360 × gc_repo/100 × V_prev
-pnl     = dV + coupon − financing
-bp      = pnl / denom                         (denom = monthly 100k-DV01)
-r_BE_bp = r_TIPS_bp − r_UST_bp
-cum_*   = Σ daily bp
+dirty_real = clean + accrued                         (accrued to the value date)
+V          = dirty_real × IR    (UST: IR = 1)
+ΔV         = V − V_prev          (same bond; never across a roll)
+gross_bp   = (ΔV + coupon) / DV01
+fin_bp     = (d/360 × gc_repo/100 × V_prev) / DV01
+r_leg_bp   = gross_bp − fin_bp
+r_BE_bp    = r_TIPS_bp − r_UST_bp ;  cum_* = Σ daily bp
 ```
+`notional = 1e7 / DV01`, so `notional/100 × DV01 = 100,000` (the 100k-DV01 sizing).
 
-### Conventions (read once)
-- Returns are **DV01-normalized to 100k per leg**, rebalanced monthly — so a leg's daily bp ≈ **−(change in yield) + carry**.
-- Financing is **mid GC only**. Repo **bid/offer and specialness are NOT included** here (model them with the ±x knob in the dashboard).
-- Cumulative columns are a **linear sum** of daily bp (not compounded). Convexity ignored (desk-approved).
-- Blank TIPS cells in the earliest rows = that tenor's TIPS didn't exist yet (UST-only); breakeven starts once both legs trade.
+### Conventions / caveats
+- DV01-normalized to **100k per leg**, reset at the monthly rebalance (held constant within the month).
+- **Repo bid/offer `x` & specialness are NOT in these numbers** (GC mid). For long-BE apply
+  `(GC + x_tips)` on TIPS and `(GC − x_nom)` on UST; short-BE flips. Use the dashboard to set `x`.
+- `d` (held days) drives **both** accrual and repo, so a Fri→Mon step correctly carries 3 days of each.
+- **BBG tie-out:** set Bloomberg's settlement to the **value date** (`date` column) so accrued and repo
+  both run over the actual held days. Example (10y, 2026-06-15, d=3): `r_BE = +1.657 bp`.
+- Blank TIPS cells in the earliest rows = that tenor's TIPS didn't exist yet (UST-only); BE starts once both legs trade.

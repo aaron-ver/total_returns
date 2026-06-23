@@ -111,6 +111,13 @@ def _first_bday_on_or_after(ts):
     return cal[i] if i < len(cal) else None
 
 
+def _next_bday(ts):
+    """Next business day (T+1) on the bond-market calendar — the settlement date."""
+    cal = trading_calendar()
+    i = cal.searchsorted(pd.Timestamp(ts), side="right")
+    return cal[i] if i < len(cal) else (pd.Timestamp(ts) + pd.offsets.BDay(1))
+
+
 def roll_schedule(leg, tenor):
     """Issue-date-gated roll events [(effective_date, cusip)] (roll-fix spec). A bond is used
     only on/after its issue date; legs ride the TIPS auction clock and the nominal is fitted:
@@ -182,6 +189,7 @@ def leg_series(leg, tenor, cpi, gc):
     start = eff[0]
     rows = {}
     cur_c = cur_mo = denom = None
+    prev_emit_c = None                                     # last cusip actually emitted (roll flag)
     for t in all_days:
         if t < start:
             continue
@@ -220,11 +228,16 @@ def leg_series(leg, tenor, cpi, gc):
         pnl = dV + cpn - fin
         bp = pnl / denom
         fin_sens = (days / 360.0 * Vp / 10000.0) / denom
-        rows[t] = {"cusip": c, "clean": rt["clean"], "yield": rt["ytm"],
+        is_roll = prev_emit_c is not None and c != prev_emit_c
+        prev_emit_c = c
+        rows[t] = {"cusip": c, "settle": _next_bday(t), "clean": rt["clean"], "yield": rt["ytm"],
                    "accrued": rt["accrued"], "IR": rt["IR"], "dirty_real": rt["dirty_real"],
-                   "V": Vt, "DV01": rt["dv01_per100"], "denom": denom, "dV": dV,
-                   "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
-                   "bp": bp, "fin_sens": fin_sens}
+                   "V": Vt, "DV01": rt["dv01_per100"], "denom": denom,
+                   "notional": 1.0e7 / denom,             # face giving 100k DV01 (held all month)
+                   "dV": dV, "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
+                   "gross_bp": (dV + cpn) / denom,         # price+coupon return, before financing
+                   "fin_bp": fin / denom,                  # financing drag (bp), GC mid
+                   "bp": bp, "fin_sens": fin_sens, "is_roll": is_roll, "is_coupon": cpn != 0.0}
     return pd.DataFrame.from_dict(rows, orient="index").sort_index()
 
 

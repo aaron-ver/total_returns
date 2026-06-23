@@ -33,59 +33,88 @@ CACHE = engine.CACHE
 EXPORTS = os.path.join(HERE, "exports")
 TENORS = ["5y", "10y", "30y"]
 
+# Output column order (per-tenor sheet), built in tenor_full().
 FULL_COLS = [
-    "TIPS_cusip", "UST_cusip", "gc_repo",
-    "TIPS_clean", "TIPS_yield", "TIPS_accrued", "TIPS_IR", "TIPS_dirty_real", "TIPS_V",
-    "TIPS_DV01", "TIPS_denom", "TIPS_dV", "TIPS_coupon", "TIPS_days", "TIPS_financing",
-    "TIPS_pnl", "r_TIPS_bp",
-    "UST_clean", "UST_yield", "UST_accrued", "UST_IR", "UST_dirty", "UST_V",
-    "UST_DV01", "UST_denom", "UST_dV", "UST_coupon", "UST_days", "UST_financing",
-    "UST_pnl", "r_UST_bp",
-    "r_BE_bp", "cum_TIPS_bp", "cum_UST_bp", "cum_BE_bp",
+    "settlement_date", "d", "gc_repo",
+    # --- TIPS leg ---
+    "TIPS_cusip", "TIPS_notional", "TIPS_DV01", "V_tips", "TIPS_dirty_real", "TIPS_IR",
+    "TIPS_clean", "TIPS_gross_bp", "TIPS_fin_bp", "r_TIPS_bp",
+    # --- UST (nominal) leg ---
+    "UST_cusip", "UST_notional", "UST_DV01", "V_nom", "UST_dirty", "UST_clean",
+    "UST_gross_bp", "UST_fin_bp", "r_UST_bp",
+    # --- breakeven ---
+    "net_financing_bp", "r_BE_bp", "cum_TIPS_bp", "cum_UST_bp", "cum_BE_bp",
+    # --- flags ---
+    "is_roll_day", "is_coupon_day", "is_weekend_or_holiday_step",
 ]
 
 README_ROWS = [
-    ("date", "business day (the return is for prior business day -> this day)"),
-    ("TIPS_cusip / UST_cusip", "the on-the-run bond each leg tracks that day (rolls 1st b-day of month)"),
-    ("gc_repo", "GC financing rate used that day (%, GCFRTSY; USRG1T/fed funds before 2009)"),
-    ("*_clean", "quoted clean (real for TIPS) price, per 100 face (Bloomberg PX_CLEAN_MID)"),
-    ("*_yield", "yield to maturity (%, real for TIPS, nominal for UST; Bloomberg YLD_YTM_MID)"),
-    ("*_accrued", "accrued interest per 100 (computed from coupon schedule, act/act)"),
-    ("TIPS_IR", "index ratio = DRI/base CPI (computed from CPI, matches Treasury to 1e-6); UST_IR=1"),
+    ("date", "business day / value date (the return is for prior business day -> this day)"),
+    ("settlement_date", "T+1 business day from the bond-market calendar (informational)"),
+    ("d", "calendar days the position is held & financed since the prior business day "
+          "(=1 normal, 3 Fri->Mon, 4+ holidays). Accrual (via dV) AND repo both scale with d."),
+    ("gc_repo", "GC financing rate that day (%, GCFRTSY; USRG1T/fed funds before 2009)"),
+    ("TIPS_cusip / UST_cusip", "on-the-run bond each leg tracks (issue-date-gated TIPS-clock roll)"),
+    ("*_notional", "face giving 100k DV01 = 1e7 / DV01 (set at the monthly reset, held all month)"),
+    ("*_DV01", "sizing DV01 per 100 face (our calc, NOT BBG TIPS risk which is ~half); set at the "
+               "monthly reset and held constant -> it is the bp denominator"),
+    ("V_tips / V_nom", "cash value per 100 face: TIPS = dirty_real * IR ; UST = dirty"),
     ("*_dirty_real / UST_dirty", "clean + accrued (real for TIPS)"),
-    ("*_V", "cash value = dirty_real * IR (TIPS) ; = dirty (UST)"),
-    ("*_DV01", "DV01 per 100 face (real-yield DV01 * IR for TIPS; nominal for UST; our calc, not BBG)"),
-    ("*_denom", "DV01 at the monthly rebalance, held constant within the month (the 100k-DV01 divisor)"),
-    ("*_dV", "V - V_prev within the SAME bond (never across a roll)"),
-    ("*_coupon", "coupon cash booked that day (TIPS = C/2 * IR; paid when a coupon date passes)"),
-    ("*_days", "calendar days since prior business day (act/360 financing)"),
-    ("*_financing", "days/360 * gc_repo/100 * V_prev"),
-    ("*_pnl", "dV + coupon - financing  (per 100 face)"),
-    ("r_TIPS_bp / r_UST_bp", "leg daily return in bp = pnl / denom"),
-    ("r_BE_bp", "r_TIPS_bp - r_UST_bp  (long-TIPS / short-UST breakeven, mid financing)"),
-    ("cum_*", "running linear sum of the daily bp (NOT compounded)"),
-    ("NOTE", "repo bid/offer & specialness NOT included here (mid GC). Apply +/-x via the tool."),
+    ("TIPS_IR", "index ratio = DRI/base CPI (from CPI, matches Treasury to 1e-6); UST IR = 1"),
+    ("*_clean", "quoted clean price per 100 (Bloomberg PX_CLEAN_MID)"),
+    ("*_gross_bp", "leg price+coupon return before financing = (dV + coupon) / DV01"),
+    ("*_fin_bp", "leg financing drag in bp at GC mid = (d/360 * gc/100 * V_prev) / DV01"),
+    ("r_TIPS_bp / r_UST_bp", "leg net daily return in bp = gross_bp - fin_bp"),
+    ("net_financing_bp", "TIPS_fin_bp - UST_fin_bp (long TIPS pays, short UST earns; GC mid, x=0)"),
+    ("r_BE_bp", "net breakeven daily return = r_TIPS_bp - r_UST_bp"),
+    ("cum_*", "running LINEAR sum of daily bp (not compounded)"),
+    ("is_roll_day", "either leg switched CUSIP that day"),
+    ("is_coupon_day", "a coupon paid on either leg that day"),
+    ("is_weekend_or_holiday_step", "d > 1 (the step spans a weekend/holiday)"),
+    ("NOTE 1", "repo bid/offer x & specialness NOT in these numbers (GC mid). For long-BE apply "
+               "(GC+x_tips) on TIPS / (GC-x_nom) on UST via the dashboard; short-BE flips."),
+    ("NOTE 2", "BBG tie-out: set BBG's settlement to the VALUE date (the 'date' column) so accrued "
+               "and repo both run over the actual held days (e.g. 3 over a weekend)."),
 ]
 
 
 def tenor_full(tenor):
-    """Assemble the full day-level detail frame for one tenor (both legs side by side)."""
+    """Assemble the full day-level reproducibility table for one tenor (both legs side by side,
+    plus net breakeven + flags). Every column needed to hand-check a day on Bloomberg."""
     cpi = engine._macro()["cpi_nsa"]
     gc = engine.gc_series()
     t = engine.leg_series("tips", tenor, cpi, gc).add_prefix("TIPS_")
     u = engine.leg_series("nominal", tenor, cpi, gc).add_prefix("UST_")
     df = pd.concat([t, u], axis=1)
-    df["gc_repo"] = df["TIPS_gc"].combine_first(df["UST_gc"])
-    df["UST_dirty"] = df["UST_dirty_real"]
-    df["r_TIPS_bp"] = df["TIPS_bp"]
-    df["r_UST_bp"] = df["UST_bp"]
-    df["r_BE_bp"] = df["r_TIPS_bp"] - df["r_UST_bp"]
-    df["cum_TIPS_bp"] = df["r_TIPS_bp"].cumsum()
-    df["cum_UST_bp"] = df["r_UST_bp"].cumsum()
-    df["cum_BE_bp"] = df["r_BE_bp"].cumsum()
-    out = df.reindex(columns=FULL_COLS)
+    out = pd.DataFrame(index=df.index)
     out.index.name = "date"
-    return out
+    out["settlement_date"] = df["TIPS_settle"].combine_first(df.get("UST_settle"))
+    out["d"] = df["TIPS_days"].combine_first(df.get("UST_days"))
+    out["gc_repo"] = df["TIPS_gc"].combine_first(df.get("UST_gc"))
+    # TIPS leg
+    out["TIPS_cusip"] = df["TIPS_cusip"]; out["TIPS_notional"] = df["TIPS_notional"]
+    out["TIPS_DV01"] = df["TIPS_denom"]; out["V_tips"] = df["TIPS_V"]
+    out["TIPS_dirty_real"] = df["TIPS_dirty_real"]; out["TIPS_IR"] = df["TIPS_IR"]
+    out["TIPS_clean"] = df["TIPS_clean"]; out["TIPS_gross_bp"] = df["TIPS_gross_bp"]
+    out["TIPS_fin_bp"] = df["TIPS_fin_bp"]; out["r_TIPS_bp"] = df["TIPS_bp"]
+    # UST leg
+    out["UST_cusip"] = df["UST_cusip"]; out["UST_notional"] = df["UST_notional"]
+    out["UST_DV01"] = df["UST_denom"]; out["V_nom"] = df["UST_V"]
+    out["UST_dirty"] = df["UST_dirty_real"]; out["UST_clean"] = df["UST_clean"]
+    out["UST_gross_bp"] = df["UST_gross_bp"]; out["UST_fin_bp"] = df["UST_fin_bp"]
+    out["r_UST_bp"] = df["UST_bp"]
+    # breakeven
+    out["net_financing_bp"] = df["TIPS_fin_bp"] - df["UST_fin_bp"]
+    out["r_BE_bp"] = df["TIPS_bp"] - df["UST_bp"]
+    out["cum_TIPS_bp"] = out["r_TIPS_bp"].cumsum()
+    out["cum_UST_bp"] = out["r_UST_bp"].cumsum()
+    out["cum_BE_bp"] = out["r_BE_bp"].cumsum()
+    # flags
+    f = lambda s: s.fillna(False).astype(bool)
+    out["is_roll_day"] = f(df.get("TIPS_is_roll")) | f(df.get("UST_is_roll"))
+    out["is_coupon_day"] = f(df.get("TIPS_is_coupon")) | f(df.get("UST_is_coupon"))
+    out["is_weekend_or_holiday_step"] = out["d"] > 1
+    return out.reindex(columns=FULL_COLS)
 
 
 def _format_sheet(ws, date_col=True):
