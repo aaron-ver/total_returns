@@ -37,10 +37,10 @@ TENORS = ["5y", "10y", "30y"]
 FULL_COLS = [
     "settlement_date", "d", "gc_repo",
     # --- TIPS leg ---
-    "TIPS_cusip", "TIPS_notional", "TIPS_DV01", "V_tips", "TIPS_dirty_real", "TIPS_IR",
+    "TIPS_cusip", "TIPS_notional", "TIPS_DV01", "V_tips", "V_tips_prev", "TIPS_dirty_real", "TIPS_IR",
     "TIPS_clean", "TIPS_gross_bp", "TIPS_fin_bp", "r_TIPS_bp",
     # --- UST (nominal) leg ---
-    "UST_cusip", "UST_notional", "UST_DV01", "V_nom", "UST_dirty", "UST_clean",
+    "UST_cusip", "UST_notional", "UST_DV01", "V_nom", "V_nom_prev", "UST_dirty", "UST_clean",
     "UST_gross_bp", "UST_fin_bp", "r_UST_bp",
     # --- breakeven ---
     "net_financing_bp", "r_BE_bp", "cum_TIPS_bp", "cum_UST_bp", "cum_BE_bp",
@@ -49,10 +49,13 @@ FULL_COLS = [
 ]
 
 README_ROWS = [
-    ("date", "business day / value date (the return is for prior business day -> this day)"),
-    ("settlement_date", "T+1 business day from the bond-market calendar (informational)"),
-    ("d", "calendar days the position is held & financed since the prior business day "
-          "(=1 normal, 3 Fri->Mon, 4+ holidays). Accrual (via dV) AND repo both scale with d."),
+    ("date", "observation day. Marked to its T+1 settlement (settlement_date)."),
+    ("settlement_date", "T+1 settle (bond-market calendar). V/accrued/IR are valued to THIS date."),
+    ("d", "settlement-span = settle(t) - settle(t-1) in calendar days. Lands the weekend/holiday "
+          "carry on the day BEFORE the weekend: FRIDAY d=3 (4 before a holiday), Mon d=1; a "
+          "holiday's stale obs gets d=0. Accrual (via dV, settlement-date IR/accrued) AND repo "
+          "both scale with the SAME d on the SAME day."),
+    ("V_tips_prev / V_nom_prev", "prior settle value (the financing base): fin = d/360*gc/100*V_prev"),
     ("gc_repo", "GC financing rate that day (%, GCFRTSY; USRG1T/fed funds before 2009)"),
     ("TIPS_cusip / UST_cusip", "on-the-run bond each leg tracks (issue-date-gated TIPS-clock roll)"),
     ("*_notional", "face giving 100k DV01 = 1e7 / DV01 (set at the monthly reset, held all month)"),
@@ -62,7 +65,8 @@ README_ROWS = [
     ("*_dirty_real / UST_dirty", "clean + accrued (real for TIPS)"),
     ("TIPS_IR", "index ratio = DRI/base CPI (from CPI, matches Treasury to 1e-6); UST IR = 1"),
     ("*_clean", "quoted clean price per 100 (Bloomberg PX_CLEAN_MID)"),
-    ("*_gross_bp", "leg price+coupon return before financing = (dV + coupon) / DV01"),
+    ("*_gross_bp", "leg price+coupon return before financing = (dV + coupon) / DV01, "
+                   "dV = V(settle t) - V(settle t-1) so weekend accretion lands on Friday"),
     ("*_fin_bp", "leg financing drag in bp at GC mid = (d/360 * gc/100 * V_prev) / DV01"),
     ("r_TIPS_bp / r_UST_bp", "leg net daily return in bp = gross_bp - fin_bp"),
     ("net_financing_bp", "TIPS_fin_bp - UST_fin_bp (long TIPS pays, short UST earns; GC mid, x=0)"),
@@ -73,8 +77,10 @@ README_ROWS = [
     ("is_weekend_or_holiday_step", "d > 1 (the step spans a weekend/holiday)"),
     ("NOTE 1", "repo bid/offer x & specialness NOT in these numbers (GC mid). For long-BE apply "
                "(GC+x_tips) on TIPS / (GC-x_nom) on UST via the dashboard; short-BE flips."),
-    ("NOTE 2", "BBG tie-out: set BBG's settlement to the VALUE date (the 'date' column) so accrued "
-               "and repo both run over the actual held days (e.g. 3 over a weekend)."),
+    ("NOTE 2", "BBG tie-out: V is the dirty price at settlement_date, so set BBG settlement to "
+               "settlement_date (e.g. Friday's row -> Monday settle). dV(Friday) then carries the "
+               "3-day weekend accrual + IR; repo on Friday uses d=3. Weekly total is unchanged vs "
+               "booking on Monday -- the fix re-dates the carry, it does not re-size it."),
 ]
 
 
@@ -93,13 +99,13 @@ def tenor_full(tenor):
     out["gc_repo"] = df["TIPS_gc"].combine_first(df.get("UST_gc"))
     # TIPS leg
     out["TIPS_cusip"] = df["TIPS_cusip"]; out["TIPS_notional"] = df["TIPS_notional"]
-    out["TIPS_DV01"] = df["TIPS_denom"]; out["V_tips"] = df["TIPS_V"]
+    out["TIPS_DV01"] = df["TIPS_denom"]; out["V_tips"] = df["TIPS_V"]; out["V_tips_prev"] = df["TIPS_V_prev"]
     out["TIPS_dirty_real"] = df["TIPS_dirty_real"]; out["TIPS_IR"] = df["TIPS_IR"]
     out["TIPS_clean"] = df["TIPS_clean"]; out["TIPS_gross_bp"] = df["TIPS_gross_bp"]
     out["TIPS_fin_bp"] = df["TIPS_fin_bp"]; out["r_TIPS_bp"] = df["TIPS_bp"]
     # UST leg
     out["UST_cusip"] = df["UST_cusip"]; out["UST_notional"] = df["UST_notional"]
-    out["UST_DV01"] = df["UST_denom"]; out["V_nom"] = df["UST_V"]
+    out["UST_DV01"] = df["UST_denom"]; out["V_nom"] = df["UST_V"]; out["V_nom_prev"] = df["UST_V_prev"]
     out["UST_dirty"] = df["UST_dirty_real"]; out["UST_clean"] = df["UST_clean"]
     out["UST_gross_bp"] = df["UST_gross_bp"]; out["UST_fin_bp"] = df["UST_fin_bp"]
     out["r_UST_bp"] = df["UST_bp"]

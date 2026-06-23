@@ -110,14 +110,16 @@ def _price_vec(yp, w, N, K, c, maxN):
     return coupon_pv + principal_pv
 
 
-def bond_metrics(clean, ytm, coupon, maturity, dated, ir=None, freq=2, bump_bp=1.0):
-    """Vectorized daily metrics for ONE bond over the dates of `clean`/`ytm` (aligned Series,
-    ytm in percent). Returns a DataFrame indexed by date with:
-       accrued, dirty_real (clean+accrued), IR, V (=dirty_real*IR), dv01_per100 (cash, per 1bp).
-    ir: optional aligned Series (TIPS index ratio); None => 1.0 (nominal).
-    Same DCF as price_real_dirty()/risk_dv01(), just across all dates at once."""
+def bond_metrics(clean, ytm, coupon, maturity, dated, ir=None, freq=2, bump_bp=1.0, settle=None):
+    """Vectorized daily metrics for ONE bond, indexed by OBSERVATION date.
+    Values to the SETTLEMENT date: accrued / coupon-period position / DV01 are computed at
+    `settle` (T+1 business day, parallel to clean.index) while `clean`/`ytm` are the close
+    quotes on the observation date -> dirty(settle) = clean(obs) + accrued(settle). `ir` must
+    already be the index ratio AT settle (aligned to clean.index). settle=None -> value to obs
+    date (legacy). Returns columns: clean, ytm, accrued, dirty_real, IR, V, dv01_per100, settle."""
     idx = clean.index
-    dates = idx.values.astype("datetime64[D]")
+    val = pd.DatetimeIndex(settle) if settle is not None else idx   # valuation (settlement) dates
+    dates = val.values.astype("datetime64[D]")
     cds = np.array([np.datetime64(pd.Timestamp(d), "D")
                     for d in [pd.Timestamp(dated)] + pay_dates(maturity, dated, freq)])
     pos = np.searchsorted(cds, dates, side="right")   # # of cds <= date
@@ -144,7 +146,8 @@ def bond_metrics(clean, ytm, coupon, maturity, dated, ir=None, freq=2, bump_bp=1
     irv = np.ones(len(idx)) if ir is None else ir.reindex(idx).to_numpy(dtype=float)
     out = pd.DataFrame({"clean": clean.to_numpy(dtype=float), "ytm": yv,
                         "accrued": accrued, "dirty_real": dirty_real, "IR": irv,
-                        "V": dirty_real * irv, "dv01_per100": dv01_real * irv}, index=idx)
+                        "V": dirty_real * irv, "dv01_per100": dv01_real * irv,
+                        "settle": val}, index=idx)
     return out[valid]
 
 

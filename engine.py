@@ -86,23 +86,37 @@ def _bond_pack(cusip, leg, cpi):
         return None
     coupon, maturity, base_cpi = _static(cusip)
     dated = _dated_date(cusip)
+    # value each obs day to its T+1 SETTLEMENT date: accrued/IR/DV01 to settle(obs)
+    settle = _next_bday_array(df.index)
     ir = None
     if leg == "tips":
         if base_cpi is None:
             return None
-        ir = dl.index_ratio_series(cpi, base_cpi, df.index)
-    m = pricing.bond_metrics(df["PX_CLEAN_MID"], df["YLD_YTM_MID"], coupon, maturity, dated, ir=ir)
+        ir_at_settle = dl.index_ratio_series(cpi, base_cpi, settle)        # indexed by settle date
+        ir = pd.Series(ir_at_settle.reindex(settle).to_numpy(), index=df.index)  # IR(settle) per obs
+    m = pricing.bond_metrics(df["PX_CLEAN_MID"], df["YLD_YTM_MID"], coupon, maturity, dated,
+                             ir=ir, settle=settle)
     pds = pricing.pay_dates(maturity, dated)
     return {"m": m, "pay": pds, "coupon": coupon, "base_cpi": base_cpi, "leg": leg}
 
 
 _CAL = None
 def trading_calendar():
-    """Holiday-aware business-day calendar (fed funds publishes only on US business days)."""
+    """Holiday-aware bond-market business-day calendar (fed funds publishes only on US business
+    days), extended ~1y forward so next_bday() resolves for the most recent observations."""
     global _CAL
     if _CAL is None:
-        _CAL = pd.DatetimeIndex(sorted(_macro()["fed_funds"].dropna().index))
+        base = pd.DatetimeIndex(sorted(_macro()["fed_funds"].dropna().index))
+        fwd = pd.bdate_range(base.max() + pd.Timedelta(days=1), base.max() + pd.Timedelta(days=400))
+        _CAL = base.union(fwd)
     return _CAL
+
+
+def _next_bday_array(idx):
+    """Vectorized T+1 settlement date for each date in idx (next bond-market business day)."""
+    cal = trading_calendar()
+    pos = cal.searchsorted(pd.DatetimeIndex(idx), side="right").clip(max=len(cal) - 1)
+    return cal[pos]
 
 
 def _first_bday_on_or_after(ts):
@@ -211,30 +225,37 @@ def leg_series(leg, tenor, cpi, gc):
             cur_c, cur_mo = c, mo
         if iloc == 0 or not np.isfinite(denom) or denom == 0:
             continue
-        tprev = m.index[iloc - 1]
         rt, rp = m.iloc[iloc], m.iloc[iloc - 1]
         Vt, Vp = rt["V"], rp["V"]
         if not np.isfinite(Vt) or not np.isfinite(Vp):
             continue
+        # settlement-date-driven span: d(t) = settle(t) - settle(t-1). ΔV already spans this
+        # (V is marked to settle), so the weekend's 3-day accrual lands on FRIDAY (whose settle
+        # jumps to Monday); repo must use the SAME d on the SAME day.
+        st, sp = pd.Timestamp(rt["settle"]), pd.Timestamp(rp["settle"])
+        d = (st - sp).days
         dV = Vt - Vp
-        days = (t - tprev).days
-        g = gc.asof(tprev)
-        fin = days / 360.0 * (g / 100.0) * Vp if np.isfinite(g) else 0.0
+        g = gc.asof(t)
+        # repo accrues on the cash borrowed at the START of the span (the prior settle value
+        # V_prev), over d days. (The spec's literal V(t) over-charges a growing position by
+        # ~ d*rate*dV/360 -> a systematic drift; V_prev is the standard financed-return base
+        # and keeps the weekend re-dating weekly-invariant.)
+        fin = d / 360.0 * (g / 100.0) * Vp if np.isfinite(g) else 0.0
         cpn = 0.0
         for pdte in packs[c]["pay"]:
-            if tprev < pdte <= t:
+            if sp < pdte <= st:                            # coupon paid within the settle span
                 irc = float(rt["IR"]) if leg == "tips" else 1.0
                 cpn += (packs[c]["coupon"] / 2.0) * irc
         pnl = dV + cpn - fin
         bp = pnl / denom
-        fin_sens = (days / 360.0 * Vp / 10000.0) / denom
+        fin_sens = (d / 360.0 * Vp / 10000.0) / denom
         is_roll = prev_emit_c is not None and c != prev_emit_c
         prev_emit_c = c
-        rows[t] = {"cusip": c, "settle": _next_bday(t), "clean": rt["clean"], "yield": rt["ytm"],
+        rows[t] = {"cusip": c, "settle": st, "clean": rt["clean"], "yield": rt["ytm"],
                    "accrued": rt["accrued"], "IR": rt["IR"], "dirty_real": rt["dirty_real"],
-                   "V": Vt, "DV01": rt["dv01_per100"], "denom": denom,
+                   "V": Vt, "V_prev": Vp, "DV01": rt["dv01_per100"], "denom": denom,
                    "notional": 1.0e7 / denom,             # face giving 100k DV01 (held all month)
-                   "dV": dV, "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
+                   "dV": dV, "coupon": cpn, "days": d, "gc": g, "financing": fin, "pnl": pnl,
                    "gross_bp": (dV + cpn) / denom,         # price+coupon return, before financing
                    "fin_bp": fin / denom,                  # financing drag (bp), GC mid
                    "bp": bp, "fin_sens": fin_sens, "is_roll": is_roll, "is_coupon": cpn != 0.0}
