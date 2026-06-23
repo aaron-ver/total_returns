@@ -46,6 +46,7 @@ FULL_COLS = [
     "net_financing_bp", "r_BE_bp", "cum_TIPS_bp", "cum_UST_bp", "cum_BE_bp",
     # --- flags ---
     "is_roll_day", "is_coupon_day", "is_weekend_or_holiday_step",
+    "Is_5y_auction_date", "Is_10y_auction_date", "Is_30y_auction_date",
 ]
 
 README_ROWS = [
@@ -75,6 +76,8 @@ README_ROWS = [
     ("is_roll_day", "either leg switched CUSIP that day"),
     ("is_coupon_day", "a coupon paid on either leg that day"),
     ("is_weekend_or_holiday_step", "d > 1 (the step spans a weekend/holiday)"),
+    ("Is_5y/10y/30y_auction_date", "True if a 5y/10y/30y security (TIPS or nominal) was "
+                                   "auctioned that calendar day (Treasury auction calendar)"),
     ("NOTE 1", "repo bid/offer x & specialness NOT in these numbers (GC mid). For long-BE apply "
                "(GC+x_tips) on TIPS / (GC-x_nom) on UST via the dashboard; short-BE flips."),
     ("NOTE 2", "BBG tie-out: V is the dirty price at settlement_date, so set BBG settlement to "
@@ -82,6 +85,18 @@ README_ROWS = [
                "3-day weekend accrual + IR; repo on Friday uses d=3. Weekly total is unchanged vs "
                "booking on Monday -- the fix re-dates the carry, it does not re-size it."),
 ]
+
+
+_AUCT_DATES = None
+def _auction_date_sets():
+    """Set of auction dates per original tenor (TIPS + nominal, from the Treasury calendar)."""
+    global _AUCT_DATES
+    if _AUCT_DATES is None:
+        import auctions
+        a = auctions.load_auctions()
+        _AUCT_DATES = {ten: set(pd.to_datetime(a[a["tenor"] == ten]["auctionDate"]).dropna().dt.normalize())
+                       for ten in ("5y", "10y", "30y")}
+    return _AUCT_DATES
 
 
 def tenor_full(tenor):
@@ -120,6 +135,11 @@ def tenor_full(tenor):
     out["is_roll_day"] = f(df.get("TIPS_is_roll")) | f(df.get("UST_is_roll"))
     out["is_coupon_day"] = f(df.get("TIPS_is_coupon")) | f(df.get("UST_is_coupon"))
     out["is_weekend_or_holiday_step"] = out["d"] > 1
+    # auction-date flags (TIPS or nominal of that tenor auctioned that day) — in EVERY sheet
+    asets = _auction_date_sets()
+    nd = out.index.normalize()
+    for ten in ("5y", "10y", "30y"):
+        out[f"Is_{ten}_auction_date"] = nd.isin(asets[ten])
     return out.reindex(columns=FULL_COLS)
 
 
@@ -150,17 +170,28 @@ def export_full(path=None):
         frames[ten] = tenor_full(ten)
     macro = engine._macro()
     readme = pd.DataFrame(README_ROWS, columns=["column", "description"])
-    with pd.ExcelWriter(path, engine="openpyxl") as xl:
-        readme.to_excel(xl, sheet_name="README", index=False)
-        _format_sheet(xl.sheets["README"], date_col=False)
-        for ten in TENORS:
-            frames[ten].to_excel(xl, sheet_name=ten)
-            _format_sheet(xl.sheets[ten])
+    locked = []
+    try:                                                   # the multi-sheet workbook
+        with pd.ExcelWriter(path, engine="openpyxl") as xl:
+            readme.to_excel(xl, sheet_name="README", index=False)
+            _format_sheet(xl.sheets["README"], date_col=False)
+            for ten in TENORS:
+                frames[ten].to_excel(xl, sheet_name=ten)
+                _format_sheet(xl.sheets[ten])
+            macro.to_excel(xl, sheet_name="macro")
+            _format_sheet(xl.sheets["macro"])
+        print(f"  wrote {path}  ({', '.join(TENORS)} sheets + macro + README)")
+    except PermissionError:
+        locked.append(os.path.basename(path))
+    for ten in TENORS:                                     # per-tenor CSVs (each independent)
+        try:
             frames[ten].to_csv(os.path.join(EXPORTS, f"breakeven_{ten}.csv"))
-        macro.to_excel(xl, sheet_name="macro")
-        _format_sheet(xl.sheets["macro"])
-    print(f"  wrote {path}  ({', '.join(TENORS)} sheets + macro + README)")
-    print(f"  wrote per-tenor CSVs in {EXPORTS}")
+        except PermissionError:
+            locked.append(f"breakeven_{ten}.csv")
+    if locked:
+        print(f"  !! could not write (file open/locked — close it and re-run): {', '.join(locked)}")
+    else:
+        print(f"  wrote per-tenor CSVs in {EXPORTS}")
     return path
 
 

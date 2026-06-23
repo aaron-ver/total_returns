@@ -303,13 +303,17 @@ def preview(cusip=None, rows=24):
 
 
 def current_otr_cusips():
-    """The CUSIPs currently holding an OTR role (latest month of the schedule).
-    These are the only bonds whose cache needs refreshing day-to-day; off-the-run and
-    matured bonds are frozen."""
-    import auctions
-    s = auctions.otr_schedule()
-    last = s["month"].max()
-    return s[s["month"] == last][["cusip", "leg"]].drop_duplicates()
+    """The CUSIPs the ENGINE currently holds (latest roll per leg/tenor), so `update` refreshes
+    exactly the bonds the series uses. Uses engine.roll_schedule (the source of truth) -- NOT
+    the old monthly otr_schedule, which returns different nominals and left them stale."""
+    import engine
+    rows = []
+    for leg in ("tips", "nominal"):
+        for ten in ("5y", "10y", "30y"):
+            ev = engine.roll_schedule(leg, ten)
+            if ev:
+                rows.append({"cusip": ev[-1][1], "leg": leg})
+    return pd.DataFrame(rows).drop_duplicates()
 
 
 def update():
