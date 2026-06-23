@@ -116,6 +116,18 @@ def otr_schedule():
     return sched
 
 
+def new_issues(leg, tenor):
+    """Distinct NEW issues (a CUSIP's first/original issue) for a leg/tenor, sorted by
+    issue date. One row per CUSIP: [cusip, issueDate, auctionDate]. Reopenings (same CUSIP,
+    later issueDate) are collapsed to the original. This is the basis for issue-date-gated
+    rolls (a bond may be used only on/after its issue date — reference: roll-fix spec)."""
+    a = load_auctions()
+    sub = a[(a.leg == leg) & (a.tenor == tenor)].copy()
+    sub = sub.dropna(subset=["issueDate"]).sort_values("issueDate")
+    sub = sub.drop_duplicates("cusip", keep="first")     # earliest issue = original new issue
+    return sub[["cusip", "issueDate", "auctionDate"]].reset_index(drop=True)
+
+
 def otr_universe():
     """Distinct CUSIPs that have ever held an OTR role (the bonds to pull prices for)."""
     s = otr_schedule()

@@ -17,7 +17,10 @@ Construction (desk decisions, confirmed):
   * Coupon: booked the day a coupon date passes (TIPS = C/2 x IR(pay date)); dirty already
     drops via the accrued reset. No reinvestment / notional does not grow.
   * Financing: days/360 x GC x V_{t-1}, GC = GCFRTSY (mid), both legs as longs.
-  * Roll: 1st business day of the month per the OTR schedule (auctions.py, §9.2.1).
+  * Roll: ISSUE-DATE-GATED, on the TIPS auction clock (see roll_schedule). A bond is used
+    only on/after its issue date. TIPS roll 1st b-day after a new-issue month (5y May/Nov,
+    10y Feb/Aug, 30y Mar); nominal 5y/30y roll on that boundary; nominal 10y is staggered
+    (stays on the prior note until the new Feb/Aug note's 15th issue date). Freeze between.
   * Accumulate LINEARLY (cumsum of daily bp), not compounded. Convexity ignored.
 
 Usage:
@@ -93,67 +96,135 @@ def _bond_pack(cusip, leg, cpi):
     return {"m": m, "pay": pds, "coupon": coupon, "base_cpi": base_cpi, "leg": leg}
 
 
-def leg_series(leg, tenor, cpi, gc):
-    """DV01-normalized bp return for one leg/tenor, spliced across the OTR schedule.
+_CAL = None
+def trading_calendar():
+    """Holiday-aware business-day calendar (fed funds publishes only on US business days)."""
+    global _CAL
+    if _CAL is None:
+        _CAL = pd.DatetimeIndex(sorted(_macro()["fed_funds"].dropna().index))
+    return _CAL
 
-    DV01 denominator is set at the MONTHLY rebalance (the DV01 of the month's OTR bond at
-    the start of the month) and held CONSTANT within the month -- consistent with rebalancing
-    the position to 100k DV01 each month rather than every day. Returns a DataFrame indexed by
-    date with: bp (the mid-financed return) and fin_sens (bp drag per 1bp of repo half-spread,
-    so the interactive tool can re-apply repo spreads without rebuilding)."""
-    sched = auctions.otr_schedule()
-    sub = sched[(sched.leg == leg) & (sched.tenor == tenor)].sort_values("month")
-    if sub.empty:
-        return pd.DataFrame(columns=["bp", "fin_sens"])
-    month_cusip = {pd.Timestamp(r.month): r.cusip for r in sub.itertuples()}
+
+def _first_bday_on_or_after(ts):
+    cal = trading_calendar()
+    i = cal.searchsorted(pd.Timestamp(ts))
+    return cal[i] if i < len(cal) else None
+
+
+def roll_schedule(leg, tenor):
+    """Issue-date-gated roll events [(effective_date, cusip)] (roll-fix spec). A bond is used
+    only on/after its issue date; legs ride the TIPS auction clock and the nominal is fitted:
+
+      TIPS (all tenors): roll on the 1st business day of the month AFTER the new-issue auction
+        (the new TIPS settled at the prior month-end, so it is already spot-tradeable).
+        -> 5y: May/Nov; 10y: Feb/Aug; 30y: Mar.   (reopenings keep the same CUSIP)
+      Nominal 5y / 30y: roll ON the TIPS-roll date to the OTR nominal as of that date (its
+        issue date is at/before the boundary -> clean, no mid-month switch).
+      Nominal 10y (SPECIAL): the matching new note (Feb/Aug) isn't issued until the 15th,
+        AFTER the TIPS roll on the 1st. So the nominal stays on the previous note for days
+        1-14 and switches to the new note ON ITS ISSUE DATE (the 15th). Only Feb & Aug new
+        notes are used; intervening new issues (May/Nov) are frozen out.
+      Between TIPS rolls: FREEZE both legs (no rolling to intervening new issues).
+    """
+    ev = []   # (effective_date, issue_date, cusip)
+    if leg == "tips":
+        for _, r in auctions.new_issues("tips", tenor).iterrows():
+            iss = pd.Timestamp(r["issueDate"])
+            eff = _first_bday_on_or_after(iss + pd.offsets.MonthBegin(1))   # 1st b-day of next month
+            if eff is not None:
+                ev.append((eff, iss, r["cusip"]))
+    elif tenor == "10y":                                   # nominal 10y: staggered, 15th of Feb/Aug
+        ni = auctions.new_issues("nominal", "10y")
+        ni = ni[pd.to_datetime(ni["issueDate"]).dt.month.isin([2, 8])]
+        for _, r in ni.iterrows():
+            iss = pd.Timestamp(r["issueDate"]); eff = _first_bday_on_or_after(iss)
+            if eff is not None:
+                ev.append((eff, iss, r["cusip"]))
+    else:                                                  # nominal 5y / 30y: roll at TIPS boundary
+        ni = auctions.new_issues("nominal", tenor).sort_values("issueDate")
+        iss = pd.to_datetime(ni["issueDate"]).to_numpy(); cus = ni["cusip"].tolist()
+        for rd, _c in roll_schedule("tips", tenor):
+            j = np.searchsorted(iss, np.datetime64(pd.Timestamp(rd)), side="right") - 1
+            if j >= 0:
+                ev.append((pd.Timestamp(rd), pd.Timestamp(iss[j]), cus[j]))  # OTR nominal at boundary
+    # collapse: at a given effective date keep the LATEST-issued cusip (handles pre-data issues
+    # all clamped to the calendar start -> the one actually on-the-run at the start wins), then
+    # drop consecutive duplicate cusips (reopenings / unchanged OTR).
+    bydate = {}
+    for eff, iss, c in sorted(ev, key=lambda x: (x[0], x[1])):
+        bydate[eff] = c
+    out = []
+    for eff in sorted(bydate):
+        if not out or out[-1][1] != bydate[eff]:
+            out.append((eff, bydate[eff]))
+    return out
+
+
+def leg_series(leg, tenor, cpi, gc):
+    """DV01-normalized bp return for one leg/tenor, spliced across the issue-date-gated roll
+    schedule (roll_schedule). The DV01 denominator is reset to the held bond's DV01 at the
+    start of each epoch -- an epoch boundary is either a calendar-month start (the monthly
+    100k-DV01 rebalance) or a roll (CUSIP change) -- and held constant within the epoch.
+    Returns a DataFrame indexed by date with the full per-day detail (bp, fin_sens, etc.)."""
+    import bisect
+    events = roll_schedule(leg, tenor)
+    if not events:
+        return pd.DataFrame()
+    eff = [e[0] for e in events]; ecus = [e[1] for e in events]
     packs = {}
-    for c in sub["cusip"].unique():
+    for c in set(ecus):
         p = _bond_pack(c, leg, cpi)
         if p is not None:
             packs[c] = p
+    if not packs:
+        return pd.DataFrame()
+    all_days = sorted(set().union(*[set(p["m"].index) for p in packs.values()]))
+    start = eff[0]
     rows = {}
-    for mo in sorted(month_cusip):
-        c = month_cusip[mo]
+    cur_c = cur_mo = denom = None
+    for t in all_days:
+        if t < start:
+            continue
+        k = bisect.bisect_right(eff, t) - 1                # active cusip = latest roll <= t
+        if k < 0:
+            continue
+        c = ecus[k]
         if c not in packs:
             continue
-        pk = packs[c]; m = pk["m"]
-        nextmo = mo + pd.DateOffset(months=1)
-        before = m.index[m.index < mo]
-        in_month = m.index[(m.index >= mo) & (m.index < nextmo)]
-        # monthly rebalance DV01: the month's OTR bond DV01 at the start of the holding period
-        # (last obs before the month = the rebalance point), held constant all month.
-        denom = m["dv01_per100"].loc[before[-1]] if len(before) else float("nan")
-        if (not np.isfinite(denom) or denom == 0) and len(in_month):
-            denom = m["dv01_per100"].loc[in_month[0]]
-        if not np.isfinite(denom) or denom == 0:
+        m = packs[c]["m"]
+        if t not in m.index:
             continue
-        for t in in_month:
-            iloc = m.index.get_loc(t)
-            if iloc == 0:
-                continue                       # no prior obs in this bond
-            tprev = m.index[iloc - 1]
-            rt, rp = m.iloc[iloc], m.iloc[iloc - 1]
-            Vt, Vp = rt["V"], rp["V"]
-            if not np.isfinite(Vt) or not np.isfinite(Vp):
-                continue
-            dV = Vt - Vp
-            days = (t - tprev).days
-            g = gc.asof(tprev)
-            fin = days / 360.0 * (g / 100.0) * Vp if np.isfinite(g) else 0.0
-            cpn = 0.0
-            for pdte in pk["pay"]:
-                if tprev < pdte <= t:
-                    irc = float(rt["IR"]) if leg == "tips" else 1.0
-                    cpn += (pk["coupon"] / 2.0) * irc
-            pnl = dV + cpn - fin
-            bp = pnl / denom
-            # bp drag per 1bp of repo half-spread x: extra financing days/360 * (x/10000) * Vp.
-            fin_sens = (days / 360.0 * Vp / 10000.0) / denom
-            rows[t] = {"cusip": c, "clean": rt["clean"], "yield": rt["ytm"],
-                       "accrued": rt["accrued"], "IR": rt["IR"], "dirty_real": rt["dirty_real"],
-                       "V": Vt, "DV01": rt["dv01_per100"], "denom": denom, "dV": dV,
-                       "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
-                       "bp": bp, "fin_sens": fin_sens}
+        iloc = m.index.get_loc(t)
+        mo = t.to_period("M")
+        if c != cur_c or mo != cur_mo:                     # new denom epoch: roll or month rebalance
+            before = m.index[m.index < t]
+            d0 = m["dv01_per100"].loc[before[-1]] if len(before) else m["dv01_per100"].iat[iloc]
+            denom = d0 if (np.isfinite(d0) and d0 != 0) else m["dv01_per100"].iat[iloc]
+            cur_c, cur_mo = c, mo
+        if iloc == 0 or not np.isfinite(denom) or denom == 0:
+            continue
+        tprev = m.index[iloc - 1]
+        rt, rp = m.iloc[iloc], m.iloc[iloc - 1]
+        Vt, Vp = rt["V"], rp["V"]
+        if not np.isfinite(Vt) or not np.isfinite(Vp):
+            continue
+        dV = Vt - Vp
+        days = (t - tprev).days
+        g = gc.asof(tprev)
+        fin = days / 360.0 * (g / 100.0) * Vp if np.isfinite(g) else 0.0
+        cpn = 0.0
+        for pdte in packs[c]["pay"]:
+            if tprev < pdte <= t:
+                irc = float(rt["IR"]) if leg == "tips" else 1.0
+                cpn += (packs[c]["coupon"] / 2.0) * irc
+        pnl = dV + cpn - fin
+        bp = pnl / denom
+        fin_sens = (days / 360.0 * Vp / 10000.0) / denom
+        rows[t] = {"cusip": c, "clean": rt["clean"], "yield": rt["ytm"],
+                   "accrued": rt["accrued"], "IR": rt["IR"], "dirty_real": rt["dirty_real"],
+                   "V": Vt, "DV01": rt["dv01_per100"], "denom": denom, "dV": dV,
+                   "coupon": cpn, "days": days, "gc": g, "financing": fin, "pnl": pnl,
+                   "bp": bp, "fin_sens": fin_sens}
     return pd.DataFrame.from_dict(rows, orient="index").sort_index()
 
 
