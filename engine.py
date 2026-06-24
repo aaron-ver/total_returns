@@ -598,6 +598,23 @@ def tips_auction_calendar():
     return _TIPS_AUCT
 
 
+_TIPS_ISNEW = None
+def tips_auction_isnew():
+    """{(year, month): True if that month's anchoring TIPS auction is a NEW issue, else reopening}.
+    New-issue months in the modern rotation are Jan (10y), Feb (30y), Apr (5y), Jul (10y), Oct (5y);
+    the rest are reopenings. Derived from the auction's `reopening` flag (robust to schedule drift),
+    aligned to the same anchor dates as tips_auction_calendar(). Used to group/condition the seasonal
+    analysis on new-issue vs reopening months."""
+    global _TIPS_ISNEW
+    if _TIPS_ISNEW is None:
+        s = auctions.real_tips_auctions().dropna(subset=["auctionDate"]).copy()
+        is_re = s["reopening"].astype(str).str.strip().str.lower().isin(["yes", "true", "1", "t", "y"])
+        reopen = {pd.Timestamp(d): bool(b) for d, b in zip(pd.to_datetime(s["auctionDate"]), is_re)}
+        _TIPS_ISNEW = {ym: not reopen.get(pd.Timestamp(d), False)
+                       for ym, d in tips_auction_calendar().items()}
+    return _TIPS_ISNEW
+
+
 def _last_trading_day(year, month, cal):
     end = pd.Timestamp(year, month, 1) + pd.offsets.MonthEnd(0)
     return cal[cal.searchsorted(end, side="right") - 1]
@@ -631,11 +648,14 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
       tips_pnl, ust_pnl  -- SUM of the engine's daily bp (DV01-normalized P&L) inside the bucket
       trading_days       -- # days summed (0 -> empty/clamped bucket; pnl recorded NaN)
       clamped            -- the month hit a clamp (short P3 / empty P4, or empty P1)
+      new_issue          -- the month's anchoring TIPS auction is a NEW issue (else a reopening),
+                            so the analysis can group/condition on new-issue vs reopening months
     The 48-bar seasonal, cumulative path, within-month signature and every phase-2 grouping are
     group-bys on this one table. Beta-hedged breakeven is derived downstream as tips - beta*ust
     (beta fixed within a month, so sum-then-scale == scale-then-sum)."""
     cal = trading_calendar()
     aucs = tips_auction_calendar()
+    isnew = tips_auction_isnew()
     rows, early_hits = [], []
     for ten in tenors:
         try:
@@ -648,6 +668,7 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
             if anc is None:
                 continue                          # no TIPS auction that month -> unbucketable
             _A0, A1, A2, A3, _A4, clamped, kind = anc
+            nw = bool(isnew.get((int(y), int(m)), True))   # new issue vs reopening month
             if kind == "early":
                 early_hits.append((ten, int(y), int(m)))
             d = sub.index
@@ -656,12 +677,12 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
                 mask = per == p
                 td = int(mask.sum())
                 if td == 0:
-                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, 0, bool(clamped)))
+                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, 0, bool(clamped), nw))
                 else:
                     rows.append((int(y), int(m), p, ten, float(sub["r_TIPS_bp"].to_numpy()[mask].sum()),
-                                 float(sub["r_UST_bp"].to_numpy()[mask].sum()), td, bool(clamped)))
+                                 float(sub["r_UST_bp"].to_numpy()[mask].sum()), td, bool(clamped), nw))
     df = pd.DataFrame(rows, columns=["year", "month", "period", "tenor",
-                                     "tips_pnl", "ust_pnl", "trading_days", "clamped"])
+                                     "tips_pnl", "ust_pnl", "trading_days", "clamped", "new_issue"])
     if early_hits:
         print(f"  [seasonal] early-auction clamp fired {len(early_hits)}x (front-of-month auctions, "
               f"e.g. {early_hits[0]}); P1 recorded empty for those months")

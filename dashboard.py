@@ -10,14 +10,21 @@ live net P&L, and a one-click CSV download of the current window.
 Three views (top-left toggle):
   * Chart  -- cumulative long/short/mid breakeven net P&L (the repo half-spread sliders).
   * Table  -- the same, as daily or monthly rows with a window total.
-  * Seasonal -- auction-cycle view (engine.seasonal_table). Every month is split into 4 periods
-    around its single TIPS auction (A0..A4, ±1 week; shared monthly auction calendar across all
-    three tenors), the engine's daily P&L is SUMMED per bucket, and buckets are stacked across
-    years with the MEDIAN (+ 25-75 IQR whiskers, n). Shown as 4 bars/calendar-month + a
-    cumulative seasonal path, plus a "within-month signature" (each period pooled across months).
-    Metric toggle TIPS / Nominal / Breakeven, with a β slider on Breakeven (= TIPS − β·UST;
-    β=100% is the plain DV01-matched breakeven, default 75%). Units are the engine's bp
-    (= $/100k-DV01 P&L; ×$100k = dollars). Late-/early-auction clamps -> empty buckets are NaN.
+  * Seasonal -- auction-cycle & calendar analysis (engine.seasonal_table). Every month is split
+    into 4 periods around its single TIPS auction (A0..A4, ±1 week; shared monthly anchor across
+    all three tenors). Four sub-modes (toggle):
+      - Aggregate: 4 bars/calendar-month (median across years, 25-75 IQR, n) + cumulative seasonal
+        path + a "within-month signature" (each period pooled across months -> the pure cycle).
+      - History: each (year,month,period) bucket as a point over time (high-contrast lines, x=year);
+        period CHECKBOXES + Month filter (e.g. P1 all months = every P1 over time).
+      - Calendar: the CALENDAR effect -- median daily P&L by business-day-of-month (turn-of-month
+        etc.), independent of the auction cycle; Month filter to isolate one month.
+      - Predict: OLS regressions P1->P2, P2->P3, P3->P4, (P1+P2)->P3, (P1+P2)->(P3+P4) across months
+        (slope, R^2, corr, t-stat, n; |t|>2 flagged) + a scatter -- does early-month predict later?
+    Shared controls: Metric TIPS / Nominal / Breakeven (β slider on Breakeven, = TIPS − β·UST,
+    β=100% plain, default 75%); Sample window Full / 5Y / 3Y; Issue type All / New / Reopen
+    (new-issue vs reopening months). All aggregation is client-side off the shipped seas table, so
+    every control is instant. Units = engine bp (= $/100k-DV01 P&L; ×$100k = dollars).
 
 Output: dashboard.html  (open in any browser; Plotly is embedded so it works offline).
 
@@ -65,6 +72,7 @@ def build_payload():
                 "y": [int(v) for v in s["year"]], "m": [int(v) for v in s["month"]],
                 "p": [int(v) for v in s["period"]], "t": nn("tips_pnl"), "u": nn("ust_pnl"),
                 "d": [int(v) for v in s["trading_days"]], "c": [bool(v) for v in s["clamped"]],
+                "n": [bool(v) for v in s["new_issue"]],   # new-issue (vs reopening) month
             },
         }
     if not data:
@@ -132,6 +140,13 @@ __PLOTLY__
   .checks input{width:17px;height:17px;cursor:pointer;accent-color:var(--accent);flex:none}
   .checks .sw{width:12px;height:12px;border-radius:3px;flex:none}
   .checks .rng{color:var(--muted);font-size:11px}
+  #seasmode.sm4 button{font-size:11px;padding:7px 2px}
+  #seascal,#seasreg{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 10px 8px}
+  #seascalchart,#regchart{flex:1;min-height:0}
+  #regtablewrap{padding:4px 0 8px}
+  #regtablewrap table{width:auto;font-variant-numeric:tabular-nums;font-size:12px}
+  #regtablewrap th,#regtablewrap td{padding:3px 14px;text-align:right;border-bottom:1px solid var(--line);position:static}
+  #regtablewrap td:first-child,#regtablewrap th:first-child{text-align:left}
 </style></head>
 <body><div class="app">
   <div class="side">
@@ -157,8 +172,13 @@ __PLOTLY__
     <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">75</span>%
       &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 plain)</span></label>
       <input type="range" id="beta" min="0" max="150" step="5" value="75"></div>
-    <div class="grp sv" style="display:none"><label>Seasonal view</label><div class="seg" id="seasmode">
-      <button data-seasmode="agg" class="on">Aggregate</button><button data-seasmode="hist">History</button></div></div>
+    <div class="grp sv" style="display:none"><label>Sample window</label><div class="seg" id="swin">
+      <button data-swin="full" class="on">Full</button><button data-swin="5y">5Y</button><button data-swin="3y">3Y</button></div></div>
+    <div class="grp sv" style="display:none"><label>Issue type (auction)</label><div class="seg" id="issue">
+      <button data-issue="all" class="on">All</button><button data-issue="new">New</button><button data-issue="reopen">Reopen</button></div></div>
+    <div class="grp sv" style="display:none"><label>Seasonal view</label><div class="seg sm4" id="seasmode">
+      <button data-seasmode="agg" class="on">Aggregate</button><button data-seasmode="hist">History</button>
+      <button data-seasmode="cal">Calendar</button><button data-seasmode="reg">Predict</button></div></div>
     <div class="grp hv" style="display:none"><label>Periods (auction cycle)</label>
       <div class="checks" id="speriod">
         <label><input type="checkbox" value="1" checked><span class="sw" style="background:#4cc9f0"></span><b>P1</b><span class="rng">m/e → auction−1w</span></label>
@@ -166,11 +186,15 @@ __PLOTLY__
         <label><input type="checkbox" value="3" checked><span class="sw" style="background:#52b788"></span><b>P3</b><span class="rng">auction → auction+1w</span></label>
         <label><input type="checkbox" value="4" checked><span class="sw" style="background:#c77dff"></span><b>P4</b><span class="rng">auction+1w → m/e</span></label>
       </div></div>
-    <div class="grp hv" style="display:none"><label>Month</label>
+    <div class="grp mv" style="display:none"><label>Month</label>
       <select id="smonth"><option value="all">All months</option><option value="1">Jan</option><option value="2">Feb</option>
         <option value="3">Mar</option><option value="4">Apr</option><option value="5">May</option><option value="6">Jun</option>
         <option value="7">Jul</option><option value="8">Aug</option><option value="9">Sep</option><option value="10">Oct</option>
         <option value="11">Nov</option><option value="12">Dec</option></select></div>
+    <div class="grp pv" style="display:none"><label>Regression to plot</label>
+      <select id="regpair"><option value="P1>P2">P1 → P2</option><option value="P2>P3">P2 → P3</option>
+        <option value="P3>P4">P3 → P4</option><option value="P12>P3">P1+P2 → P3</option>
+        <option value="P12>P34">P1+P2 → P3+P4</option></select></div>
     <button class="act rv" id="dl">Download CSV (window)</button>
     <p class="note">Long-BE = long TIPS / short UST. Both directions carry the slippage
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
@@ -195,12 +219,21 @@ __PLOTLY__
       <div class="note" id="histcap"></div>
       <div id="histchart"></div>
     </div>
+    <div id="seascal" style="display:none">
+      <div class="note" id="calcap"></div>
+      <div id="seascalchart"></div>
+    </div>
+    <div id="seasreg" style="display:none">
+      <div class="note" id="regcap"></div>
+      <div id="regtablewrap"></div>
+      <div id="regchart"></div>
+    </div>
   </div>
 </div>
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75, seasmode:"agg", periods:[1,2,3,4], smonth:"all"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swin:"full", issue:"all", regpair:"P1>P2"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -238,19 +271,24 @@ function monthly(s){
   return ord.map(m=>[m,...map[m]]);
 }
 function applyView(){
-  const seasonal = S.view==="seasonal", hist = seasonal && S.seasmode==="hist";
+  const seasonal = S.view==="seasonal", mode = S.seasmode;
   document.querySelectorAll(".rv").forEach(e=>e.style.display=seasonal?"none":"");
   document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
-  document.querySelectorAll(".hv").forEach(e=>e.style.display=hist?"":"none");   // history-only filters
+  document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&mode==="hist")?"":"none");      // periods (history)
+  document.querySelectorAll(".mv").forEach(e=>e.style.display=(seasonal&&mode!=="agg")?"":"none");        // month (hist/cal/reg)
+  document.querySelectorAll(".pv").forEach(e=>e.style.display=(seasonal&&mode==="reg")?"":"none");        // regression picker
   $("betagrp").classList.toggle("off", seasonal && S.smetric!=="be");   // β only acts on Breakeven
   $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
   $("tablewrap").style.display=(!seasonal && S.view==="table")?"":"none";
-  $("seaswrap").style.display=(seasonal && !hist)?"":"none";
-  $("seashist").style.display=hist?"":"none";
+  $("seaswrap").style.display=(seasonal&&mode==="agg")?"":"none";
+  $("seashist").style.display=(seasonal&&mode==="hist")?"":"none";
+  $("seascal").style.display=(seasonal&&mode==="cal")?"":"none";
+  $("seasreg").style.display=(seasonal&&mode==="reg")?"":"none";
 }
+const SEASDRAW={agg:()=>drawSeasonal(),hist:()=>drawHistory(),cal:()=>drawCalendar(),reg:()=>drawPredict()};
 function render(){
   applyView();
-  if(S.view==="seasonal"){ S.seasmode==="hist"?drawHistory():drawSeasonal(); return; }
+  if(S.view==="seasonal"){ (SEASDRAW[S.seasmode]||SEASDRAW.agg)(); return; }
   const s = series();
   const last = a => a.length?a[a.length-1]:0;
   $("tl").textContent=fmt(last(s.cL),0); $("ts").textContent=fmt(last(s.cS),0); $("tm").textContent=fmt(last(s.cM),0);
@@ -273,6 +311,18 @@ function drawChart(s){
 }
 function median(a){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),n=b.length,h=n>>1; return n%2?b[h]:(b[h-1]+b[h])/2; }
 function quantile(a,q){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),pos=(b.length-1)*q,lo=Math.floor(pos); return b[lo]+((b[lo+1]??b[lo])-b[lo])*(pos-lo); }
+// --- shared seasonal filters: sample window (Full/5Y/3Y), issue type (new/reopen), month ---
+function lastYM(){ const s=DATA[S.tenor].seas; let mx=0; for(let i=0;i<s.y.length;i++){const k=s.y[i]*12+s.m[i]; if(k>mx)mx=k;} return mx; }
+function winCut(){ return S.swin==="full" ? 0 : lastYM()-((S.swin==="3y"?36:60)-1); }   // min y*12+m allowed
+function rowPass(s,i,withMonth){                              // s = DATA[tenor].seas, i = row index
+  if(S.issue==="new" && !s.n[i]) return false;
+  if(S.issue==="reopen" && s.n[i]) return false;
+  const c=winCut(); if(c && (s.y[i]*12+s.m[i])<c) return false;
+  if(withMonth && S.smonth!=="all" && s.m[i]!==+S.smonth) return false;
+  return true;
+}
+function filtDesc(){ return (S.swin==="full"?"full sample":"last "+S.swin)
+  + (S.issue==="all"?"":", "+(S.issue==="new"?"new-issue":"reopening")+" months"); }
 function seasonalAgg(){
   // Pure group-by on the keystone bucket table: per (year,month,period) we have the bucket-SUMMED
   // leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=t-(β/100)·u. Stack across YEARS with the
@@ -282,7 +332,8 @@ function seasonalAgg(){
     if(S.smetric==="tips")return t; if(S.smetric==="nom")return u;
     return (t==null||u==null)?null:t-beta*u; };
   const byMP={}, byP={1:[],2:[],3:[],4:[]}, clMP={};
-  for(let i=0;i<sd.y.length;i++){ const v=valOf(i); if(v==null)continue;
+  for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false))continue;   // window + issue (not month: this IS the by-month view)
+    const v=valOf(i); if(v==null)continue;
     const m=sd.m[i],p=sd.p[i],k=(m-1)*4+(p-1);
     (byMP[k]=byMP[k]||[]).push(v); byP[p].push(v); if(sd.c[i])clMP[k]=(clMP[k]||0)+1; }
   const med=[[],[],[],[]],q1=[[],[],[],[]],q3=[[],[],[],[]],ns=[[],[],[],[]],clamp=[[],[],[],[]];
@@ -323,9 +374,9 @@ function drawSeasonal(){
     {responsive:true,displaylogo:false});
   const desc=S.smetric==="be"?("<b>Breakeven = TIPS − "+S.beta+"%·UST</b> (β=100% is the plain DV01-matched breakeven)")
                              :("<b>"+MNAME[S.smetric]+"</b> leg");
-  $("seascap").innerHTML="Showing "+desc+" per auction-cycle period. Bars = <b>median across years</b> of the bucket-summed P&L"
-    +" (bp on 100k DV01; ×$100k = $); whiskers = 25–75th pctile; gold = cumulative seasonal path."
-    +" Each month split around its single TIPS auction (A0..A4, ±1w); late-clamped P3/empty P4 shown with smaller n.";
+  $("seascap").innerHTML="Showing "+desc+" per auction-cycle period — <b>"+filtDesc()+"</b>. Bars = "
+    +"<b>median across years</b> of the bucket-summed P&L (bp on 100k DV01; ×$100k = $); whiskers = "
+    +"25–75th pctile; gold = cumulative seasonal path. Split around the month's single TIPS auction (A0..A4, ±1w).";
 }
 function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
@@ -335,8 +386,8 @@ function seasonalHistory(){
   const byP={1:[],2:[],3:[],4:[]};
   for(let i=0;i<sd.y.length;i++){
     const p=sd.p[i],m=sd.m[i],y=sd.y[i];
-    if(S.smonth!=="all" && m!==+S.smonth) continue;
     if(!S.periods.includes(p)) continue;
+    if(!rowPass(sd,i,true)) continue;             // window + issue + month
     const v=valOf(sd.t[i],sd.u[i]); if(v==null) continue;
     byP[p].push({x:y+"-"+String(m).padStart(2,"0")+"-"+String(pday[p-1]).padStart(2,"0"),v:v});
   }
@@ -370,6 +421,108 @@ function drawHistory(){
     +(S.smetric==="be"?", BE = TIPS − "+S.beta+"%·UST":"")+") for <b>"+perlbl+"</b>, "+monthlbl
     +", joined left→right in time (x = year). "+all.length+" buckets; dashed gold = median of the shown selection."
     +" Tick periods + pick a month at left (e.g. P1 only + All months = every month's P1 through time; P3 + Jan = each January's P3).";
+}
+// ============ Calendar effect: average daily P&L by business-day-of-month ============
+function ymNewMap(){ const s=DATA[S.tenor].seas,mp={}; for(let i=0;i<s.y.length;i++)mp[s.y[i]*12+s.m[i]]=s.n[i]; return mp; }
+function seasonalCalendar(){
+  // Per-DAY (not per-period): tag each day with its business-day-of-month (BDOM, its ordinal among
+  // the trading days of its month) and aggregate the metric by BDOM across the filtered sample.
+  const d=DATA[S.tenor], beta=S.beta/100, nm=ymNewMap(), cut=winCut();
+  const valOf=i=>S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i];
+  const byB={}; let curYM="", bd=0;
+  for(let i=0;i<d.dates.length;i++){
+    const ds=d.dates[i], ym=ds.slice(0,7);
+    if(ym!==curYM){curYM=ym; bd=0;} bd++;                       // BDOM counts every trading day in the month
+    const y=+ds.slice(0,4), m=+ds.slice(5,7), key=y*12+m;
+    if(S.smonth!=="all" && m!==+S.smonth) continue;
+    if(S.issue==="new" && !nm[key]) continue;
+    if(S.issue==="reopen" && nm[key]) continue;
+    if(cut && key<cut) continue;
+    const v=valOf(i); if(v==null||isNaN(v)) continue;
+    (byB[bd]=byB[bd]||[]).push(v);
+  }
+  const bdoms=Object.keys(byB).map(Number).sort((a,b)=>a-b);
+  const med=bdoms.map(b=>median(byB[b])), q1=bdoms.map(b=>quantile(byB[b],0.25)),
+        q3=bdoms.map(b=>quantile(byB[b],0.75)), ns=bdoms.map(b=>byB[b].length);
+  let c=0; const cum=med.map(v=>{c+=(v||0); return c;});
+  return {bdoms,med,q1,q3,ns,cum};
+}
+function drawCalendar(){
+  const a=seasonalCalendar(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  const bars={type:"bar",name:"median",x:a.bdoms,y:a.med,marker:{color:"#2f81f7"},
+    error_y:{type:"data",symmetric:false,array:a.med.map((v,i)=>v==null?0:a.q3[i]-v),
+             arrayminus:a.med.map((v,i)=>v==null?0:v-a.q1[i]),color:"rgba(230,237,243,.22)",thickness:1,width:0},
+    customdata:a.ns,hovertemplate:"business day %{x}: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};
+  const cum={type:"scatter",mode:"lines",name:"cumulative",yaxis:"y2",x:a.bdoms,y:a.cum,
+    line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.2f} bp<extra></extra>"};
+  Plotly.react("seascalchart",[bars,cum],{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:42},
+    title:{text:S.tenor+" — "+mname+" by business day of month (median)",font:{size:13}},
+    xaxis:{title:"business day of month  (1 = first trading day)",gridcolor:"#2d3a48",dtick:1},
+    yaxis:{title:"median daily P&L (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
+    yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
+    hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}}},{responsive:true,displaylogo:false});
+  $("calcap").innerHTML="The <b>calendar effect</b>: average daily P&L by <b>business day of month</b>, "
+    +"independent of the auction cycle — <b>"+filtDesc()+"</b>, "+(S.smonth==="all"?"all months":MONTHS[+S.smonth-1])
+    +". Bars = median across the sample (whiskers 25–75th); gold = cumulative within-month path. Pick a month at left to isolate it.";
+}
+// ============ Predict: OLS regressions between within-month periods ============
+function rowVal(s,i){ const beta=S.beta/100,t=s.t[i],u=s.u[i];
+  return S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); }
+function monthBuckets(){                                        // {ym: {1:v,2:v,3:v,4:v}} over filtered months
+  const s=DATA[S.tenor].seas, out={};
+  for(let i=0;i<s.y.length;i++){ if(!rowPass(s,i,true))continue; const v=rowVal(s,i); if(v==null)continue;
+    const ym=s.y[i]*12+s.m[i]; (out[ym]=out[ym]||{})[s.p[i]]=v; }
+  return out;
+}
+const REGS=[
+  {key:"P1>P2",lab:"P1 → P2",fx:b=>b[1],fy:b=>b[2]},
+  {key:"P2>P3",lab:"P2 → P3",fx:b=>b[2],fy:b=>b[3]},
+  {key:"P3>P4",lab:"P3 → P4",fx:b=>b[3],fy:b=>b[4]},
+  {key:"P12>P3",lab:"P1+P2 → P3",fx:b=>b[1]+b[2],fy:b=>b[3]},
+  {key:"P12>P34",lab:"P1+P2 → P3+P4",fx:b=>b[1]+b[2],fy:b=>b[3]+b[4]},
+];
+function ols(xs,ys){
+  const n=xs.length; if(n<3)return null;
+  let sx=0,sy=0,sxx=0,sxy=0,syy=0;
+  for(let i=0;i<n;i++){sx+=xs[i];sy+=ys[i];sxx+=xs[i]*xs[i];sxy+=xs[i]*ys[i];syy+=ys[i]*ys[i];}
+  const mx=sx/n,my=sy/n,ssxx=sxx-n*mx*mx,ssxy=sxy-n*mx*my,ssyy=syy-n*my*my;
+  if(ssxx<=0||ssyy<=0)return null;
+  const b=ssxy/ssxx,a=my-b*mx,r=ssxy/Math.sqrt(ssxx*ssyy),r2=r*r;
+  const sse=Math.max(ssyy-b*ssxy,0),seb=Math.sqrt(sse/Math.max(n-2,1)/ssxx),t=seb>0?b/seb:0;
+  return {n,a,b,r,r2,t};
+}
+function regResults(){
+  const mb=monthBuckets();
+  return REGS.map(R=>{ const xs=[],ys=[];
+    for(const ym in mb){ const b=mb[ym],xv=R.fx(b),yv=R.fy(b);
+      if(xv==null||yv==null||isNaN(xv)||isNaN(yv))continue; xs.push(xv); ys.push(yv); }
+    return {key:R.key,lab:R.lab,xs,ys,f:ols(xs,ys)}; });
+}
+function drawPredict(){
+  const res=regResults();
+  let h="<table><thead><tr><th>relationship</th><th>n</th><th>slope</th><th>R²</th><th>corr</th><th>t-stat</th></tr></thead><tbody>";
+  for(const r of res){ const f=r.f;
+    h+="<tr><td>"+r.lab+"</td>"+(f?("<td>"+f.n+"</td><td>"+f.b.toFixed(3)+"</td><td>"+f.r2.toFixed(3)
+      +"</td><td>"+f.r.toFixed(3)+"</td><td class='"+(Math.abs(f.t)>2?"pos":"")+"'>"+f.t.toFixed(2)+"</td>")
+      :"<td colspan='5'>n/a (need ≥3 months)</td>")+"</tr>"; }
+  $("regtablewrap").innerHTML=h+"</tbody></table>";
+  const sel=res.find(r=>r.key===S.regpair)||res[0], f=sel.f;
+  const traces=[{type:"scatter",mode:"markers",name:"months",x:sel.xs,y:sel.ys,
+    marker:{color:"#2f81f7",size:6,opacity:.7},hovertemplate:"predictor %{x:+.2f} → target %{y:+.2f} bp<extra></extra>"}];
+  if(f){ const xmn=Math.min(...sel.xs),xmx=Math.max(...sel.xs);
+    traces.push({type:"scatter",mode:"lines",name:"OLS fit",x:[xmn,xmx],y:[f.a+f.b*xmn,f.a+f.b*xmx],line:{color:"#f5a623",width:2}}); }
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  Plotly.react("regchart",traces,{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:34,b:42},
+    title:{text:sel.lab+"   ("+mname+", "+filtDesc()+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
+    xaxis:{title:"predictor (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
+    yaxis:{title:"target (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
+    hovermode:"closest",showlegend:false},{responsive:true,displaylogo:false});
+  $("regcap").innerHTML="Does early-month performance predict later? Each point = one month ("+filtDesc()
+    +(S.smonth==="all"?"":", "+MONTHS[+S.smonth-1])+"); OLS of target on predictor, bucket P&L in bp. "
+    +"|t|&gt;2 (~5% significance) highlighted green. Pick which relationship to plot at left. "
+    +"Month / Issue-type / Sample filters condition the regression.";
 }
 function drawTable(s){
   const cols=["period","TIPS","UST","BEmid","longBE","shortBE"];
@@ -405,12 +558,14 @@ const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("but
 tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.tenor;
   tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
+seg("swin","swin"); seg("issue","issue");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
   S.periods=[...$("speriod").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
 $("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); scheduleRender();};
 $("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); scheduleRender();};
 $("beta").oninput=e=>{S.beta=+e.target.value; $("betav").textContent=S.beta; scheduleRender();};
 $("smonth").onchange=e=>{S.smonth=e.target.value; render();};
+$("regpair").onchange=e=>{S.regpair=e.target.value; render();};
 function setRangeBtn(name){ document.querySelectorAll("#range button").forEach(x=>x.classList.toggle("on", x.dataset.range===name)); }
 $("start").onchange=e=>{S.start=e.target.value||null; setRangeBtn(null); render();};
 $("end").onchange=e=>{S.end=e.target.value||null; setRangeBtn(null); render();};

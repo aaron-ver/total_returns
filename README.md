@@ -165,11 +165,40 @@ day to the left:
 - **Aggregation:** median across years per `(month, period)` with a 25–75th IQR band and `n`;
   empty/clamped buckets drop out. The "within-month signature" pools each period across all
   months to isolate the pure auction cycle.
-- **History sub-mode** (dashboard): the Seasonal view toggles **Aggregate | History**. History
-  plots each `(year, month, period)` bucket as a point in time (joined left→right by line, x =
-  year), with period **checkboxes** (tick any of P1–P4) and a **Month** filter — e.g. P1 + all
-  months = every month's P1 through time; P3 + Jan = each January's P3 across years. Dashed line =
-  median of the shown selection.
+
+### Dashboard Seasonal sub-modes & filters
+
+The Seasonal view has four sub-modes (toggle) and three shared filters, all computed client-side
+off the shipped `seas` table (so every control is instant):
+
+- **Aggregate** — the 48-bar seasonal + cumulative path + within-month signature (above).
+- **History** — each `(year, month, period)` bucket as a point over time (high-contrast lines,
+  x = year), with period **checkboxes** + Month filter (e.g. P1 + all months = every P1 over time;
+  P3 + Jan = each January's P3). Dashed line = median of the selection.
+- **Calendar** — the **calendar effect**: median daily P&L by **business-day-of-month** (BDOM),
+  *independent of the auction cycle* (the desk's point that the calendar effect now dominates).
+  Bars by BDOM + cumulative within-month path; Month filter to isolate one month. (BDOM = a day's
+  ordinal among its month's trading days; the month-end BDOMs have lower `n` since months run
+  19–23 trading days.)
+- **Predict** — OLS regressions across months: **P1→P2, P2→P3, P3→P4, (P1+P2)→P3, (P1+P2)→(P3+P4)**
+  — does early-month performance predict later? Table of slope / R² / corr / t-stat / n (|t|>2
+  flagged) + a scatter with the OLS line (pick the relationship at left). Each observation is one
+  month; respects metric/β and all filters. Start with linear OLS; richer models later.
+
+Shared filters (apply to all sub-modes):
+- **Metric** — TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
+  75%; β = 100% = plain DV01-matched). β applied per year-bucket *before* the median, so the
+  slider is instant. Units = engine **bp** (= $/100k-DV01 P&L; ×$100k = dollars).
+- **Sample window** — **Full / 5Y / 3Y** (3Y as a degraded-signal check; the auction-cycle signal
+  weakens markedly in recent windows while the calendar effect persists).
+- **Issue type** — **All / New / Reopen**. Each month's anchoring TIPS auction is tagged
+  `new_issue` (vs reopening) in the keystone table — new-issue months are Jan (10y), Feb (30y),
+  Apr (5y), Jul (10y), Oct (5y); the rest are reopenings (derived from the auction's `reopening`
+  flag per year, so it correctly reflects regime changes, e.g. the 5y Oct auction was a reopening
+  pre-2019, a new issue after). This is a clean per-month binary label — **not** bond/index
+  filtering — so it composes with the period/month/window filters without disturbing the monthly
+  anchor structure. (Conditioning regressions/calendar on new-vs-reopen is just toggling this.)
+
 - **QA** (`python engine.py seasonal`): auction day-of-month range (early-clamp guard), seam
   continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (±1-week span),
   `engine.ANALYSIS_START` (2011 cutoff), `auctions.MIN_AUCTION_SIZE` (contingency threshold), and
