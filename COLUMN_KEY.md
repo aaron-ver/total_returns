@@ -40,6 +40,7 @@ a financed **long**; the breakeven is their difference. Prices per 100 face; ret
 | `is_coupon_day` | A coupon paid on either leg that day. |
 | `is_weekend_or_holiday_step` | `d > 1` (step spans a weekend/holiday). |
 | `Is_5y_auction_date` / `Is_10y_auction_date` / `Is_30y_auction_date` | A **TIPS** of that tenor was auctioned that day — **new issue or reopening**. TIPS only (nominal auctions not flagged), so ≤1 flagged day per tenor per month. In every tenor sheet. |
+| `auction_review` | Non-blank on every auction day in a month carrying **>1 TIPS auction** (any tenor, incl. reopenings) — the months that break the one-auction-per-month cycle and need manual triage (a stray/contingency auction, e.g. 2020-07; the 2006–2010 reintroduction-era doubles). Lists that month's auctions (`REVIEW 2/mo: 5y reopen 07-10, 10y new 07-23`); **filter for `REVIEW`**. These cells are highlighted amber in the xlsx. |
 
 ### Replication chain (hand-check any day)
 ```

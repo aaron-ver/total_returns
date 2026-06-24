@@ -52,7 +52,7 @@ FULL_COLS = [
     "net_financing_bp", "r_BE_bp", "cum_TIPS_bp", "cum_UST_bp", "cum_BE_bp",
     # --- flags ---
     "is_roll_day", "is_coupon_day", "is_weekend_or_holiday_step",
-    "Is_5y_auction_date", "Is_10y_auction_date", "Is_30y_auction_date",
+    "Is_5y_auction_date", "Is_10y_auction_date", "Is_30y_auction_date", "auction_review",
 ]
 
 README_ROWS = [
@@ -85,6 +85,11 @@ README_ROWS = [
     ("Is_5y/10y/30y_auction_date", "True if a 5y/10y/30y TIPS was auctioned that calendar day "
                                    "— new issue OR reopening. TIPS only, so at most one flagged "
                                    "day per tenor per month (nominal auctions are not flagged)."),
+    ("auction_review", "Non-blank on every auction day in a month that has >1 TIPS auction (any "
+                       "tenor, incl. reopenings) — these break the one-auction-per-month cycle and "
+                       "need manual triage (e.g. a contingency/stray auction like 2020-07). The "
+                       "marker lists that month's auctions ('REVIEW 2/mo: 5y reopen 07-10, 10y new "
+                       "07-23'); filter for 'REVIEW' to find them. Highlighted amber in the xlsx."),
     ("NOTE 1", "repo bid/offer x & specialness NOT in these numbers (GC mid). For long-BE apply "
                "(GC+x_tips) on TIPS / (GC-x_nom) on UST via the dashboard; short-BE flips."),
     ("NOTE 2", "BBG tie-out: V is the dirty price at settlement_date, so set BBG settlement to "
@@ -94,21 +99,41 @@ README_ROWS = [
 ]
 
 
-_AUCT_DATES = None
-def _auction_date_sets():
-    """Set of TIPS auction dates per original tenor — BOTH new issues and reopenings — from
-    the Treasury calendar. TIPS-only on purpose: a single TIPS product auctions at most once
-    in a month, so the per-tenor flag is unambiguous (<=1 flagged day per tenor per month).
-    Including the monthly nominal auctions (as this once did) lit up several days a month for
-    the same tenor, which can't correspond to one product."""
-    global _AUCT_DATES
-    if _AUCT_DATES is None:
+def _is_reopen(v):
+    return str(v).strip().lower() in ("true", "yes", "1", "t", "y")
+
+
+_AUCT_INFO = None
+def _auction_calendar_info():
+    """TIPS-auction calendar info for the export flags. Returns (date_sets, review):
+      date_sets[tenor] = set of normalized TIPS auction dates (new issues AND reopenings).
+      review[date]     = a 'REVIEW ...' marker for every auction day that falls in a month with
+                         >1 TIPS auction of ANY tenor -- the months that break the one-auction-
+                         per-month cycle and need manual triage (e.g. 2020-07's stray 5y reopening
+                         alongside the regular 10y; the 2006-2010 reintroduction-era doubles).
+                         The marker lists that month's auctions so each can be judged case by case.
+    A single TIPS product never auctions twice in a month, so the per-tenor Is_* flag stays
+    <=1/month; the review marker is the CROSS-tenor multiplicity the desk wants to filter on."""
+    global _AUCT_INFO
+    if _AUCT_INFO is None:
         import auctions
         a = auctions.load_auctions()
-        a = a[a["leg"] == "tips"]                                  # TIPS auctions only
-        _AUCT_DATES = {ten: set(pd.to_datetime(a[a["tenor"] == ten]["auctionDate"]).dropna().dt.normalize())
-                       for ten in ("5y", "10y", "30y")}
-    return _AUCT_DATES
+        a = a[a["leg"] == "tips"].dropna(subset=["auctionDate"]).copy()
+        a["auctionDate"] = pd.to_datetime(a["auctionDate"])
+        a["nd"] = a["auctionDate"].dt.normalize()
+        date_sets = {ten: set(a[a["tenor"] == ten]["nd"]) for ten in ("5y", "10y", "30y")}
+        review = {}
+        for _ym, g in a.groupby(a["auctionDate"].dt.to_period("M")):
+            if len(g) <= 1:
+                continue                                       # ordinary single-auction month
+            g = g.sort_values("auctionDate")
+            parts = [f"{r.tenor} {'reopen' if _is_reopen(r.reopening) else 'new'} {r.auctionDate:%m-%d}"
+                     for r in g.itertuples()]
+            marker = f"REVIEW {len(g)}/mo: " + ", ".join(parts)
+            for d in g["nd"].unique():
+                review[pd.Timestamp(d)] = marker
+        _AUCT_INFO = (date_sets, review)
+    return _AUCT_INFO
 
 
 def tenor_full(tenor):
@@ -147,11 +172,13 @@ def tenor_full(tenor):
     out["is_roll_day"] = f(df.get("TIPS_is_roll")) | f(df.get("UST_is_roll"))
     out["is_coupon_day"] = f(df.get("TIPS_is_coupon")) | f(df.get("UST_is_coupon"))
     out["is_weekend_or_holiday_step"] = out["d"] > 1
-    # auction-date flags (a TIPS of that tenor auctioned that day: new issue OR reopening) — every sheet
-    asets = _auction_date_sets()
+    # auction-date flags (a TIPS of that tenor auctioned that day: new issue OR reopening) — every sheet.
+    # auction_review marks the days in months that carry >1 TIPS auction (cross-tenor) for triage.
+    asets, review = _auction_calendar_info()
     nd = out.index.normalize()
     for ten in ("5y", "10y", "30y"):
         out[f"Is_{ten}_auction_date"] = nd.isin(asets[ten])
+    out["auction_review"] = [review.get(d, "") for d in nd]
     return out.reindex(columns=FULL_COLS)
 
 
@@ -173,6 +200,30 @@ def _format_sheet(ws, date_col=True):
             cell.number_format = "yyyy-mm-dd"
 
 
+def _highlight_reviews(ws, df):
+    """Amber-fill the auction cells in multi-auction (review) months so they pop visually: the
+    auction_review marker cell plus that row's True Is_*_auction_date cells. (xlsx only; the CSV
+    carries the same info in the auction_review column for filtering.)"""
+    from openpyxl.styles import PatternFill
+    if "auction_review" not in df.columns:
+        return
+    fill = PatternFill("solid", fgColor="FFE08A")          # amber
+    hdr = {c.value: c.column for c in ws[1]}               # header name -> 1-based column index
+    rev_col = hdr.get("auction_review")
+    flagcols = {t: hdr.get(f"Is_{t}_auction_date") for t in ("5y", "10y", "30y")}
+    rev = df["auction_review"].to_numpy()
+    flags = {t: df[f"Is_{t}_auction_date"].to_numpy() for t in ("5y", "10y", "30y")}
+    for i, v in enumerate(rev):
+        if not v:
+            continue
+        r = i + 2                                          # +1 header row, +1 for 1-based
+        if rev_col:
+            ws.cell(r, rev_col).fill = fill
+        for t, col in flagcols.items():
+            if col and flags[t][i]:
+                ws.cell(r, col).fill = fill
+
+
 def export_full(path=None):
     os.makedirs(EXPORTS, exist_ok=True)
     path = path or os.path.join(EXPORTS, "breakeven_full.xlsx")
@@ -190,6 +241,7 @@ def export_full(path=None):
             for ten in TENORS:
                 frames[ten].to_excel(xl, sheet_name=ten)
                 _format_sheet(xl.sheets[ten])
+                _highlight_reviews(xl.sheets[ten], frames[ten])   # amber multi-auction months
             macro.to_excel(xl, sheet_name="macro")
             _format_sheet(xl.sheets["macro"])
         print(f"  wrote {path}  ({', '.join(TENORS)} sheets + macro + README)")
