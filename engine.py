@@ -45,6 +45,12 @@ import pricing
 
 CACHE = dl.CACHE
 
+# Analysis window start. 2011 is the first year after the 2006-2010 "two TIPS auctions in a
+# month" structure, so from here every month has exactly one real TIPS auction -> the seasonal
+# anchor is unambiguous and the desk's last-~5y focus is well inside. All output series (returns,
+# seasonal table, export, dashboard) begin here; the raw daily cache is left untouched.
+ANALYSIS_START = pd.Timestamp("2011-01-01")
+
 
 def _macro():
     return pd.read_parquet(os.path.join(CACHE, "macro.parquet"))
@@ -364,7 +370,8 @@ def leg_series(leg, tenor, cpi, gc):
                    "gross_bp": (dV + cpn) / denom,         # price+coupon return, before financing
                    "fin_bp": fin / denom,                  # financing drag (bp), GC mid
                    "bp": bp, "fin_sens": fin_sens, "is_roll": is_roll, "is_coupon": cpn != 0.0}
-    return pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    out = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    return out[out.index >= ANALYSIS_START]   # analysis window (returns built on full history, emitted 2011+)
 
 
 def build_tenor(tenor, save=True):
@@ -577,11 +584,13 @@ def tips_auction_calendar():
     earliest is used (logged once); months with none are absent (those months can't be bucketed)."""
     global _TIPS_AUCT
     if _TIPS_AUCT is None:
-        a = auctions.load_auctions()
-        s = a[a["leg"] == "tips"].dropna(subset=["auctionDate"])
+        s = auctions.real_tips_auctions().dropna(subset=["auctionDate"])   # contingency auctions excluded
         cal, multi = {}, []
         for d in sorted(pd.to_datetime(s["auctionDate"]).unique()):
-            d = pd.Timestamp(d); ym = (d.year, d.month)
+            d = pd.Timestamp(d)
+            if d < ANALYSIS_START:                          # only the 2011+ window is bucketed
+                continue
+            ym = (d.year, d.month)
             (multi.append(ym) if ym in cal else cal.setdefault(ym, d))
         if multi:
             print(f"  [seasonal] {len(multi)} month(s) had >1 TIPS auction; earliest used (e.g. {multi[0]})")

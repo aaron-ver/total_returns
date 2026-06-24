@@ -31,9 +31,16 @@ TA = "https://www.treasurydirect.gov/TA_WS/securities"
 START_YEAR = 2003
 KEEP = ["cusip", "securityType", "originalSecurityTerm", "securityTerm", "auctionDate",
         "issueDate", "datedDate", "maturityDate", "interestRate", "reopening",
-        "originalIssueDate", "refCpiOnDatedDate"]
+        "originalIssueDate", "refCpiOnDatedDate", "offeringAmount", "totalAccepted"]
+# offeringAmount = announced auction size ($); totalAccepted = amount actually issued ($, incl.
+# SOMA add-ons). A tiny size flags a contingency/test auction (e.g. 2020-07-10 5y reopen = $25mn
+# vs a real ~$14bn auction) — used in export.py to mark fake auctions.
 # original tenors we track (TIPS legs and their nominal comparators)
 TENORS = {"5-Year": "5y", "10-Year": "10y", "30-Year": "30y"}
+# Below this offering size a TIPS "auction" is a contingency/test, not a real supply event
+# (e.g. the 2020-07-10 5y reopening was $25mn vs a real ~$14bn; the next-smallest real auction
+# is $5bn). Such auctions are excluded everywhere (flags + seasonal anchor) via real_tips_auctions.
+MIN_AUCTION_SIZE = 1_000_000_000   # $1bn
 
 
 def _get(url, params):
@@ -53,8 +60,8 @@ def _norm(df):
     df["leg"] = leg.values
     for c in ("auctionDate", "issueDate", "datedDate", "maturityDate", "originalIssueDate"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
-    df["interestRate"] = pd.to_numeric(df["interestRate"], errors="coerce")
-    df["refCpiOnDatedDate"] = pd.to_numeric(df["refCpiOnDatedDate"], errors="coerce")
+    for c in ("interestRate", "refCpiOnDatedDate", "offeringAmount", "totalAccepted"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
@@ -92,6 +99,17 @@ def load_auctions():
     if not os.path.exists(AUCTIONS_PARQUET):
         return pull()
     return pd.read_parquet(AUCTIONS_PARQUET)
+
+
+def real_tips_auctions(min_size=MIN_AUCTION_SIZE):
+    """TIPS auctions with the contingency/test auctions removed (offeringAmount < min_size, e.g.
+    the 2020-07-10 $25mn 5y reopening). NaN offering amounts are KEPT (treated as real). This is
+    the single source of truth for 'a real TIPS auction' used by the export flags and the seasonal
+    anchor, so a fake auction never lights up a flag or anchors a bucket."""
+    a = load_auctions()
+    a = a[a["leg"] == "tips"].copy()
+    sz = a["offeringAmount"]
+    return a[sz.isna() | (sz >= min_size)]
 
 
 def otr_schedule():

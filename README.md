@@ -130,6 +130,12 @@ returns): sum the daily bp into auction-anchored within-month buckets, stack acr
 the **median**. Built by `engine.seasonal_table` → `cache/seasonal.parquet`; surfaced in the
 dashboard's **Seasonal** view. `python engine.py seasonal` builds the table and prints QA.
 
+**Analysis window:** all output series (returns, seasonal, export, dashboard) start **2011-01-01**
+(`engine.ANALYSIS_START`) — the first year after the 2006–2010 twin-auction structure, so every
+month has exactly one real TIPS auction. Contingency/test auctions (offering < $1bn, e.g. the
+2020-07-10 $25mn 5y) are excluded everywhere via `auctions.real_tips_auctions`
+(`MIN_AUCTION_SIZE`), so the monthly anchor is never ambiguous — no two-auction tie-break needed.
+
 **Shared monthly auction calendar** — every calendar month carries exactly one TIPS auction (the
 tenor rotates Jan 10y, Feb 30y, Mar 10y, Apr 5y, … Dec 5y); that single auction anchors **all
 three** tenor series ("how each tenor trades around the monthly TIPS supply event"). Five
@@ -144,8 +150,9 @@ day to the left:
 | P3 | A2 → A3  (auction → auction+1w; strictly post-auction, starts T+1) |
 | P4 | A3 → A4  (auction+1w → month-end) |
 
-- **Clamps:** late auction (`A3 ≥ A4`) → `A3 = A4`, short P3 + **empty P4 (NaN)**; early auction
-  (`A1 ≤ A0`, only early-history front-of-month auctions) → **empty P1 (NaN)**, logged.
+- **Clamps:** late auction (`A3 ≥ A4`) → `A3 = A4`, short P3 + **empty P4 (NaN)** (common —
+  auctions sit ~day 15–24, so `auction+1w` often passes month-end). Early auction (`A1 ≤ A0`) →
+  empty P1 (NaN); never fires in the 2011+ window (auctions are all back-half), kept as a guard.
 - **Keystone table** (`engine.seasonal_table`): one tidy row per `(year, month, period, tenor)`
   with `tips_pnl, ust_pnl` (bucket-**summed** leg P&L), `trading_days`, `clamped`. Every view —
   48-bar seasonal, cumulative path, within-month signature, and all phase-2 groupings — is a
@@ -158,9 +165,15 @@ day to the left:
 - **Aggregation:** median across years per `(month, period)` with a 25–75th IQR band and `n`;
   empty/clamped buckets drop out. The "within-month signature" pools each period across all
   months to isolate the pure auction cycle.
+- **History sub-mode** (dashboard): the Seasonal view toggles **Aggregate | History**. History
+  plots each `(year, month, period)` bucket as a point in time (joined left→right by line, x =
+  year), with period **checkboxes** (tick any of P1–P4) and a **Month** filter — e.g. P1 + all
+  months = every month's P1 through time; P3 + Jan = each January's P3 across years. Dashed line =
+  median of the shown selection.
 - **QA** (`python engine.py seasonal`): auction day-of-month range (early-clamp guard), seam
-  continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (the ±1-week
-  span) and `engine.tips_auction_calendar` (the anchor). Export integration is **phase 2**.
+  continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (±1-week span),
+  `engine.ANALYSIS_START` (2011 cutoff), `auctions.MIN_AUCTION_SIZE` (contingency threshold), and
+  `engine.tips_auction_calendar` (the anchor). Export integration is **phase 2**.
 
 ## Known limitations (by design, per desk)
 
