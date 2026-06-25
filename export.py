@@ -33,6 +33,8 @@ import os, sys
 import pandas as pd
 
 import engine
+import energy
+import hedge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = engine.CACHE
@@ -95,6 +97,39 @@ README_ROWS = [
                "settlement_date (e.g. Friday's row -> Monday settle). dV(Friday) then carries the "
                "3-day weekend accrual + IR; repo on Friday uses d=3. Weekly total is unchanged vs "
                "booking on Monday -- the fix re-dates the carry, it does not re-size it."),
+]
+
+# Energy-hedge sheet column docs (RBOB gasoline; see energy.py). Lives on its own sheet.
+ENERGY_README_ROWS = [
+    ("--- ENERGY sheet (RBOB gasoline hedge) ---", "Front-month RBOB gasoline futures. ONE "
+        "front price series (XB1) + ONE bp return series, built on the intersection of gas and "
+        "bond trading days. Source: Bloomberg XB1/XB2 Comdty PX_LAST. See energy.py."),
+    ("XB1", "generic 1st RBOB future close that day (cents/gallon) = the held FRONT-month price"),
+    ("XB2", "generic 2nd RBOB future close that day (the contract that becomes the front next month)"),
+    ("prior_mark", "the contract-consistent prior close used in the return: XB2(prev common day) "
+                   "on a roll day (the new front's own close yesterday), else XB1(prev common day)"),
+    ("days", "calendar-day gap to the prior COMMON trading day (2-3 across weekends/holidays). Gas "
+             "days that aren't bond days are skipped; bond days that aren't gas days widen the gap "
+             "(the return then spans 2-3 days), so the series lines up with the bond returns."),
+    ("is_roll", "True on the 1st common trading day of a month -- the generic front rolled "
+                "(XB1 expired end of prior month; yesterday's XB2 is today's XB1)."),
+    ("chg", "XB1(t) - prior_mark (price points / cents-per-gallon). On a roll this is a clean "
+            "single-contract move (XB1(t) - XB2(t-1)), never an old->new cross-contract jump."),
+    ("r_bp", "daily gas return in bp = chg / prior_mark * 1e4 (percentage price return). THE "
+             "return series; combine with the bond breakeven as r_BE_bp - h * r_bp at a hedge ratio h."),
+    ("cum_bp", "running LINEAR sum of r_bp (not compounded), matching the bond cum_* convention."),
+    ("ENERGY NOTE", "No financing/carry term: a same-contract futures return already excludes the "
+                    "roll yield (curve carry = the XB1-XB2 spread, which the splice steps over). "
+                    "Use `chg` to re-normalize to a $/contract (x420 for RBOB) or DV01 basis."),
+    ("--- on each TENOR sheet ---", "Every energy column above also appears on the 5y/10y/30y "
+        "sheets suffixed '_gas' (XB1_gas, usd_per_contract_gas, ...), aligned to the bond days "
+        "(a bond day with no gas obs -> NaN; that move lands on the next common day). Plus:"),
+    ("hedge_contracts_gas", "the month's gasoline hedge ratio for THIS tenor, in # of 42,000-gal "
+        "contracts per 100k-DV01 breakeven (5-day-block estimator). Set at the month's rebalance "
+        "from a trailing 2yr regression of breakeven $ on gas $/contract, held all month (in sync "
+        "with the DV01 rebalance). Positive => co-moving; SHORT this many to hedge a LONG breakeven."),
+    ("hedge_contracts_daily_gas", "same hedge ratio from the day-on-day regression (cross-check; "
+        "~500 pairs/2yr vs ~100 for the 5-day blocks). See hedge.py and cache/hedge_ratios.parquet."),
 ]
 
 
@@ -162,7 +197,61 @@ def tenor_full(tenor):
     for ten in ("5y", "10y", "30y"):
         out[f"Is_{ten}_auction_date"] = nd.isin(asets[ten])
     out["auction_size_bn"] = [round(sizes[d] / 1e9, 3) if d in sizes else None for d in nd]
-    return out.reindex(columns=FULL_COLS)
+    out = out.reindex(columns=FULL_COLS)
+    # --- fold in the gasoline hedge: energy columns (suffixed _gas) + the month's contract
+    # hedge ratio for THIS tenor (held all month, in sync with the DV01 rebalance). Energy is
+    # aligned to the bond days; a bond day with no gas obs (gas-holiday span, e.g. Good Friday)
+    # shows NaN gas -- that day's gas move lands on the next common day, by construction.
+    nrg = energy_full()
+    if nrg is not None:
+        g = nrg.reindex(out.index)
+        for col in nrg.columns:
+            out[f"{col}_gas"] = g[col]
+        out["hedge_contracts_gas"] = hedge.daily_hedge(tenor, out.index, "hedge_contracts")
+        out["hedge_contracts_daily_gas"] = hedge.daily_hedge(tenor, out.index, "hedge_contracts_daily")
+    return out
+
+
+ENERGY_COLS = ["XB1", "XB2", "prior_mark", "days", "is_roll", "chg", "usd_per_contract", "r_bp", "cum_bp"]
+
+
+HEDGE_COLS = ["tenor", "rebalance_date", "hedge_contracts", "r2_block", "corr_block",
+              "tstat_block", "n_block", "hedge_contracts_daily", "r2_daily", "corr_daily",
+              "tstat_daily", "n_daily"]
+
+
+def hedge_full():
+    """The monthly walk-forward hedge-ratio table (contracts per 100k-DV01 BE, per tenor), or
+    None if unavailable. One row per (tenor, rebalance month). See hedge.py."""
+    try:
+        df = hedge.load_ratios()
+    except Exception:
+        try:
+            df = hedge.build_all(save=True)
+        except Exception as e:
+            print(f"  hedge sheet skipped — no data ({type(e).__name__}: {e})")
+            return None
+    if df is None or df.empty:
+        return None
+    df = df.set_index(df["month"].dt.to_period("M").astype(str)).reindex(columns=HEDGE_COLS)
+    df.index.name = "rebalance_month"
+    return df
+
+
+def energy_full():
+    """The energy-hedge day-level frame (RBOB gasoline) for the export, or None if unavailable.
+    Loads the built series; falls back to building from the raw cache if the parquet is missing."""
+    try:
+        df = energy.load_energy()
+    except Exception:
+        try:
+            df = energy.build_energy(save=False)
+        except Exception as e:
+            print(f"  energy sheet skipped — no data ({type(e).__name__}: {e})")
+            return None
+    df = df.reindex(columns=ENERGY_COLS)
+    df.index.name = "date"
+    return df
 
 
 def _format_sheet(ws, date_col=True):
@@ -191,7 +280,10 @@ def export_full(path=None):
         print(f"  building {ten} ...", flush=True)
         frames[ten] = tenor_full(ten)
     macro = engine._macro()
-    readme = pd.DataFrame(README_ROWS, columns=["column", "description"])
+    nrg = energy_full()                                    # energy-hedge sheet (RBOB gasoline); None if unavailable
+    hdg = hedge_full()                                      # monthly contract hedge-ratio table; None if unavailable
+    readme = pd.DataFrame(README_ROWS + (ENERGY_README_ROWS if nrg is not None else []),
+                          columns=["column", "description"])
     locked = []
     try:                                                   # the multi-sheet workbook
         with pd.ExcelWriter(path, engine="openpyxl") as xl:
@@ -200,9 +292,17 @@ def export_full(path=None):
             for ten in TENORS:
                 frames[ten].to_excel(xl, sheet_name=ten)
                 _format_sheet(xl.sheets[ten])
+            if nrg is not None:
+                nrg.to_excel(xl, sheet_name="energy")
+                _format_sheet(xl.sheets["energy"])
+            if hdg is not None:
+                hdg.to_excel(xl, sheet_name="hedge")
+                _format_sheet(xl.sheets["hedge"], date_col=False)
             macro.to_excel(xl, sheet_name="macro")
             _format_sheet(xl.sheets["macro"])
-        print(f"  wrote {path}  ({', '.join(TENORS)} sheets + macro + README)")
+        print(f"  wrote {path}  ({', '.join(TENORS)} sheets"
+              f"{' + energy' if nrg is not None else ''}{' + hedge' if hdg is not None else ''}"
+              f" + macro + README)")
     except PermissionError:
         locked.append(os.path.basename(path))
     for ten in TENORS:                                     # per-tenor CSVs (each independent)
@@ -210,6 +310,16 @@ def export_full(path=None):
             frames[ten].to_csv(os.path.join(EXPORTS, f"breakeven_{ten}.csv"))
         except PermissionError:
             locked.append(f"breakeven_{ten}.csv")
+    if nrg is not None:                                    # standalone energy CSV
+        try:
+            nrg.to_csv(os.path.join(EXPORTS, "energy.csv"))
+        except PermissionError:
+            locked.append("energy.csv")
+    if hdg is not None:                                    # standalone hedge-ratio CSV
+        try:
+            hdg.to_csv(os.path.join(EXPORTS, "hedge_ratios.csv"))
+        except PermissionError:
+            locked.append("hedge_ratios.csv")
     if locked:
         print(f"  !! could not write (file open/locked — close it and re-run): {', '.join(locked)}")
     else:
@@ -241,7 +351,13 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    engine.refresh(update_data="--no-update" not in sys.argv)   # fresh data + returns first
+    update = "--no-update" not in sys.argv
+    engine.refresh(update_data=update)                          # fresh bond data + returns first
+    energy.refresh(update_data=update)                          # + energy hedge (XB1/XB2 pull + build)
+    try:
+        hedge.build_all()                                       # + walk-forward contract hedge ratios
+    except Exception as e:
+        print(f"  [export] hedge-ratio build skipped: {type(e).__name__}: {e}")
     if args and args[0] == "returns":
         xT = float(args[1]) if len(args) > 1 else 0.0
         xU = float(args[2]) if len(args) > 2 else xT
