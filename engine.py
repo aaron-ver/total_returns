@@ -382,6 +382,7 @@ def build_tenor(tenor, save=True):
     df = pd.DataFrame({
         "r_TIPS_bp": t["bp"], "r_UST_bp": u["bp"],
         "s_TIPS": t["fin_sens"], "s_UST": u["fin_sens"],   # bp drag per 1bp repo half-spread
+        "days": t["days"].combine_first(u["days"]),        # settlement span; 0 = bond-market holiday (stale, pnl=0)
     }).sort_index()
     df["r_BE_bp"] = df["r_TIPS_bp"] - df["r_UST_bp"]
     df["cum_TIPS_bp"] = df["r_TIPS_bp"].cumsum()

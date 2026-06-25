@@ -68,6 +68,8 @@ def build_payload():
             "rBE": [round(float(v), 4) for v in d["r_BE_bp"]],
             "sT": [round(float(v), 6) for v in d["s_TIPS"]],
             "sU": [round(float(v), 6) for v in d["s_UST"]],
+            "dd": [0 if pd.isna(v) else int(v) for v in d["days"]],   # settlement span; 0 = market holiday
+
             "seas": {                                  # keystone bucket table (this tenor)
                 "y": [int(v) for v in s["year"]], "m": [int(v) for v in s["month"]],
                 "p": [int(v) for v in s["period"]], "t": nn("tips_pnl"), "u": nn("ust_pnl"),
@@ -452,11 +454,13 @@ function seasonalCalendar(cut){
   // (turn-of-month) instead of smearing at the high forward-BDOMs (months run 19–23 trading days).
   const d=DATA[S.tenor], beta=S.beta/100, nm=ymNewMap();
   const valOf=i=>S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i];
-  const T={}; for(let i=0;i<d.dates.length;i++){const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // trading days/month
+  const hol=i=>d.dd[i]===0;                                     // bond-market holiday (stale d=0 row): not a trading day
+  const T={}; for(let i=0;i<d.dates.length;i++){ if(hol(i))continue; const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // real trading days/month
   const byB={}; let curYM="", bd=0;
   for(let i=0;i<d.dates.length;i++){
+    if(hol(i)) continue;                                        // skip holidays: don't count in BDOM, don't aggregate
     const ds=d.dates[i], ym=ds.slice(0,7);
-    if(ym!==curYM){curYM=ym; bd=0;} bd++;                       // counts every trading day in the month
+    if(ym!==curYM){curYM=ym; bd=0;} bd++;                       // counts only real trading days in the month
     const m=+ds.slice(5,7), key=(+ds.slice(0,4))*12+m;
     if(!monthPass(m)) continue;
     if(S.issue==="new" && !nm[key]) continue;
