@@ -7,8 +7,11 @@ op -> instant, no server, no lag. Plotly.js for charts (zoom/pan/hover), native 
 pickers + range sliders, a clean CSS layout, a sortable raw-numbers table (daily or monthly),
 live net P&L, and a one-click CSV download of the current window.
 
-Tenor is MULTI-SELECT (toggle, >=1 on): with several selected the Chart and the seasonal Calendar
-overlay one line per tenor; all other views use the first-selected (primary) tenor. Windows are shared.
+Tenor is MULTI-SELECT only where overlay is supported -- the Chart and the seasonal Calendar (one
+line per tenor); every other view is single-tenor (selecting a tenor switches to it, and switching
+to such a view collapses to the primary). Windows are shared. The two repo half-spread sliders apply
+everywhere now (chart, table AND every seasonal view): they net the financing cost off each leg
+(TIPS by x_TIPS, UST by x_UST; the breakeven scales the UST cost by beta); set both 0 for mid.
 
 Three views (top-left toggle):
   * Chart  -- single tenor: cumulative long/short/mid breakeven net P&L (repo half-spread sliders).
@@ -92,6 +95,7 @@ def build_payload():
             "seas": {                                  # keystone bucket table (this tenor)
                 "y": [int(v) for v in s["year"]], "m": [int(v) for v in s["month"]],
                 "p": [int(v) for v in s["period"]], "t": nn("tips_pnl"), "u": nn("ust_pnl"),
+                "st": nn("tips_slip"), "su": nn("ust_slip"),   # Σ repo half-spread sensitivity (apply x_TIPS/x_UST)
                 "d": [int(v) for v in s["trading_days"]], "c": [bool(v) for v in s["clamped"]],
                 "n": [bool(v) for v in s["new_issue"]],   # new-issue (vs reopening) month
             },
@@ -178,16 +182,16 @@ __PLOTLY__
 <body><div class="app">
   <div class="side">
     <h1>Breakeven financed TR</h1>
-    <div class="grp"><label>Tenor <span class="note" style="padding:0">(multi = overlay in Chart/Calendar)</span></label><div class="seg" id="tenor"></div></div>
-    <div class="grp rv"><label>Repo half-spread x_TIPS <span class="hl" id="xtv">3.0</span> bp</label>
+    <div class="grp"><label>Tenor <span class="note" id="tennote" style="padding:0">(multi = overlay in Chart/Calendar)</span></label><div class="seg" id="tenor"></div></div>
+    <div class="grp"><label>Repo half-spread x_TIPS <span class="hl" id="xtv">3.0</span> bp</label>
       <input type="range" id="xt" min="0" max="25" step="0.5" value="3"></div>
-    <div class="grp rv"><label>Repo half-spread x_UST <span class="hl" id="xuv">3.0</span> bp</label>
+    <div class="grp"><label>Repo half-spread x_UST <span class="hl" id="xuv">3.0</span> bp</label>
       <input type="range" id="xu" min="0" max="25" step="0.5" value="3"></div>
     <div class="grp rv"><label>Date range</label>
       <div class="row"><input type="date" id="start"></div>
       <div class="row"><input type="date" id="end"></div>
       <div class="seg" id="range" style="margin-top:6px"><button data-range="full">Full</button>
-        <button data-range="5y">5y</button><button data-range="1y">1y</button><button data-range="ytd">YTD</button></div></div>
+        <button data-range="5y">5Y</button><button data-range="3y">3Y</button></div></div>
     <div class="grp"><label>View</label><div class="seg" id="view">
       <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button>
       <button data-view="seasonal">Seasonal</button></div></div>
@@ -237,7 +241,9 @@ __PLOTLY__
     <button class="act rv" id="dl">Download CSV (window)</button>
     <p class="note">Long-BE = long TIPS / short UST. Both directions carry the slippage
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
-      Specialness not modeled. Full hand-replication data: <code>python export.py</code>.</p>
+      The two repo half-spread sliders apply <b>everywhere</b> (chart, table and every seasonal view):
+      they net the financing cost off each leg (TIPS by x_TIPS, UST by x_UST; β scales the UST cost).
+      Set both 0 for mid. Specialness not modeled. Full data: <code>python export.py</code>.</p>
   </div>
   <div class="main">
     <div class="totals rv" id="totals"></div>
@@ -313,8 +319,11 @@ function monthly(s){
   }
   return ord.map(m=>[m,...map[m]]);
 }
+function overlayOK(){ return S.view==="chart" || (S.view==="seasonal" && S.seasmode==="cal"); }  // only Chart & seasonal Calendar overlay tenors
 function applyView(){
   const seasonal = S.view==="seasonal", mode = S.seasmode;
+  if(!overlayOK() && S.tenors.length>1){ S.tenors=[S.tenor]; syncTenorBtns(); }   // collapse to primary where overlay is unsupported
+  $("tennote").textContent = overlayOK() ? "(multi = overlay here)" : "(single tenor in this view)";
   document.querySelectorAll(".rv").forEach(e=>e.style.display=seasonal?"none":"");
   document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
   document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&(mode==="hist"||mode==="cum"))?"":"none"); // periods (history/cumul)
@@ -399,6 +408,19 @@ function winList(){ const l=["full","5y","3y"].filter(w=>S.swins.includes(w)); r
 function winMain(){ return winList()[0]; }                                 // longest selected (full>5y>3y): dense views
 function sgn(){ return S.pos==="short"?-1:1; }                // short position = mirror the (mid) metric
 function dirS(){ return S.pos==="short"?" — SHORT":""; }
+// Metric net of the repo half-spread. The half-spread is a financing COST in either direction
+// (long pays GC+x, short earns GC−x), so it is subtracted regardless of sgn(); at x=0 long/short
+// are exact mirrors. seasMetric works off the bucket-summed slippage (st/su); dayMetric off daily s.
+function seasMetric(t,u,ts,us){ const beta=S.beta/100; let v,slip;
+  if(S.smetric==="tips"){ v=t; slip=S.xT*(ts||0); }
+  else if(S.smetric==="nom"){ v=u; slip=S.xU*(us||0); }
+  else { if(t==null||u==null) return null; v=t-beta*u; slip=S.xT*(ts||0)+beta*S.xU*(us||0); }
+  return v==null?null:sgn()*v-slip; }
+function dayMetric(d,i){ const beta=S.beta/100; let v,slip;
+  if(S.smetric==="tips"){ v=d.rT[i]; slip=S.xT*d.sT[i]; }
+  else if(S.smetric==="nom"){ v=d.rU[i]; slip=S.xU*d.sU[i]; }
+  else { v=d.rT[i]-beta*d.rU[i]; slip=S.xT*d.sT[i]+beta*S.xU*d.sU[i]; }
+  return v==null?null:sgn()*v-slip; }
 function monthPass(m){ return S.smonths.includes(m); }
 function monthLbl(){ const a=S.smonths; if(a.length===12)return "all months"; if(!a.length)return "no months";
   return a.length<=4 ? a.slice().sort((x,y)=>x-y).map(m=>MONTHS[m-1]).join(", ") : a.length+" months"; }
@@ -415,10 +437,8 @@ function seasonalAgg(cut){
   // Pure group-by on the keystone bucket table for one sample window (cut = min y*12+m, 0=full):
   // per (year,month,period) the bucket-SUMMED leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=
   // t-(β/100)·u. Stack across YEARS with the median per (month,period); IQR (q25..q75) + n.
-  const sd=DATA[S.tenor].seas, beta=S.beta/100;
-  const valOf=i=>{ const t=sd.t[i],u=sd.u[i];
-    let v=S.smetric==="tips"?t:S.smetric==="nom"?u:((t==null||u==null)?null:t-beta*u);
-    return v==null?null:sgn()*v; };
+  const sd=DATA[S.tenor].seas;
+  const valOf=i=>seasMetric(sd.t[i],sd.u[i],sd.st[i],sd.su[i]);    // net of repo half-spread (sliders)
   const byMP={}, byMPy={}, byP={1:[],2:[],3:[],4:[]}, byPy={1:[],2:[],3:[],4:[]}, clMP={};
   for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false,cut))continue;   // window + issue (not month: this IS the by-month view)
     const v=valOf(i); if(v==null)continue;
@@ -487,14 +507,14 @@ function drawSeasonal(){
 function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
   // period and/or one calendar month, returned per period sorted chronologically.
-  const sd=DATA[S.tenor].seas, beta=S.beta/100, pday=[4,11,18,25], cut=winCutOf(winMain());   // day-of-month to place each period
-  const valOf=(t,u)=>{ let v=S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); return v==null?null:sgn()*v; };
+  const sd=DATA[S.tenor].seas, pday=[4,11,18,25], cut=winCutOf(winMain());   // day-of-month to place each period
+  const valOf=i=>seasMetric(sd.t[i],sd.u[i],sd.st[i],sd.su[i]);   // net of repo half-spread (sliders)
   const byP={1:[],2:[],3:[],4:[]};
   for(let i=0;i<sd.y.length;i++){
     const p=sd.p[i],m=sd.m[i],y=sd.y[i];
     if(!S.periods.includes(p)) continue;
     if(!rowPass(sd,i,true,cut)) continue;             // window + issue + month
-    const v=valOf(sd.t[i],sd.u[i]); if(v==null) continue;
+    const v=valOf(i); if(v==null) continue;
     byP[p].push({x:y+"-"+String(m).padStart(2,"0")+"-"+String(pday[p-1]).padStart(2,"0"),v:v});
   }
   for(const p in byP) byP[p].sort((a,b)=>a.x<b.x?-1:1);
@@ -535,8 +555,8 @@ function seasonalCalendar(cut, tenor){
   // month) and aggregate the metric by that key across the filtered sample. S.calend="end" counts
   // from the LAST trading day (key −1 = last day, −2 = second-last) so month-ends align across months
   // (turn-of-month) instead of smearing at the high forward-BDOMs (months run 19–23 trading days).
-  const d=DATA[tenor||S.tenor], beta=S.beta/100, nm=ymNewMap(tenor);
-  const valOf=i=>sgn()*(S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i]);
+  const d=DATA[tenor||S.tenor], nm=ymNewMap(tenor);
+  const valOf=i=>dayMetric(d,i);                                 // net of repo half-spread (sliders)
   const hol=i=>d.dd[i]===0;                                     // bond-market holiday (stale d=0 row): not a trading day
   const T={}; for(let i=0;i<d.dates.length;i++){ if(hol(i))continue; const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // real trading days/month
   const byB={}; let curYM="", bd=0;
@@ -596,8 +616,7 @@ function drawCalendar(){
     +" Note x = trading days (≈19–23/month), not calendar dates; use From-end to align the turn-of-month.";
 }
 // ============ Predict: OLS regressions between within-month periods ============
-function rowVal(s,i){ const beta=S.beta/100,t=s.t[i],u=s.u[i];
-  let v=S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); return v==null?null:sgn()*v; }
+function rowVal(s,i){ return seasMetric(s.t[i],s.u[i],s.st[i],s.su[i]); }   // net of repo half-spread (sliders)
 function monthBuckets(cut, withFilters){                        // {ym:{1,2,3,4}}; withFilters=issue+month, else window-only
   const s=DATA[S.tenor].seas, out={};
   for(let i=0;i<s.y.length;i++){
@@ -712,9 +731,9 @@ function drawCumul(){
 }
 // ============ Event: returns aligned at the auction (day 0), ±N business days ============
 function drawEvent(){
-  const d=DATA[S.tenor], beta=S.beta/100, N=S.evn;
+  const d=DATA[S.tenor], N=S.evn;
   const idx={}; for(let i=0;i<d.dates.length;i++) idx[d.dates[i]]=i;
-  const val=i=>sgn()*(S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i]);
+  const val=i=>dayMetric(d,i);                                   // net of repo half-spread (sliders)
   const offs=[]; for(let k=-N;k<=N;k++) offs.push(k);
   const ref=offs.map(()=>[]);                                  // per-offset values across ALL filtered auctions (median/mean)
   const curves=[]; let nAuc=0;
@@ -785,11 +804,14 @@ function seg(id,key,after){ $(id).querySelectorAll("button").forEach(b=>b.onclic
   S[key]=b.dataset[key]; $(id).querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); (after||render)(); });}
 const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("button");b.textContent=t;b.dataset.tenor=t;
   if(S.tenors.includes(t))b.classList.add("on"); tenWrap.appendChild(b);});
-tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.tenor;   // multi-toggle (>=1 stays on)
-  if(S.tenors.includes(t)){ if(S.tenors.length>1) S.tenors=S.tenors.filter(x=>x!==t); }
-  else S.tenors=TENORS.filter(x=>S.tenors.includes(x)||x===t);                            // add, keep tenor order
-  S.tenor=S.tenors[0];                                                                     // primary = first selected
-  tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",S.tenors.includes(x.dataset.tenor))); render();});
+function syncTenorBtns(){ tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",S.tenors.includes(x.dataset.tenor))); }
+tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.tenor;
+  if(overlayOK()){                                                                         // Chart / seasonal Calendar: multi-toggle (>=1 stays on)
+    if(S.tenors.includes(t)){ if(S.tenors.length>1) S.tenors=S.tenors.filter(x=>x!==t); }
+    else S.tenors=TENORS.filter(x=>S.tenors.includes(x)||x===t);                           // add, keep tenor order
+  } else S.tenors=[t];                                                                      // every other view: single-select only
+  S.tenor=S.tenors[0];                                                                      // primary = first selected
+  syncTenorBtns(); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
 seg("issue","issue"); seg("calend","calend"); seg("pos","pos");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
@@ -818,8 +840,7 @@ $("dl").onclick=downloadCSV;
 document.querySelectorAll("[data-range]").forEach(b=>b.onclick=()=>{
   const all=DATA[S.tenor].dates, lastD=all[all.length-1]; let s=null;
   if(b.dataset.range==="full") s=null;
-  else if(b.dataset.range==="ytd") s=lastD.slice(0,4)+"-01-01";
-  else { const yrs=+b.dataset.range.replace("y",""); const d=new Date(lastD); d.setFullYear(d.getFullYear()-yrs); s=d.toISOString().slice(0,10); }
+  else { const yrs=+b.dataset.range.replace("y",""); const d=new Date(lastD); d.setFullYear(d.getFullYear()-yrs); s=d.toISOString().slice(0,10); }   // 5Y / 3Y
   S.start=s; S.end=null; $("start").value=s||""; $("end").value=""; setRangeBtn(b.dataset.range); render();
 });
 setRangeBtn("full");   // default view window is full history

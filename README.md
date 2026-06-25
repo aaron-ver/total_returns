@@ -154,9 +154,10 @@ day to the left:
   auctions sit ~day 15–24, so `auction+1w` often passes month-end). Early auction (`A1 ≤ A0`) →
   empty P1 (NaN); never fires in the 2011+ window (auctions are all back-half), kept as a guard.
 - **Keystone table** (`engine.seasonal_table`): one tidy row per `(year, month, period, tenor)`
-  with `tips_pnl, ust_pnl` (bucket-**summed** leg P&L), `trading_days`, `clamped`. Every view —
-  48-bar seasonal, cumulative path, within-month signature, and all phase-2 groupings — is a
-  group-by on this one table.
+  with `tips_pnl, ust_pnl` (bucket-**summed** leg P&L), `tips_slip, ust_slip` (bucket-summed repo
+  half-spread sensitivity, so any `(x_TIPS, x_UST)` nets client-side as `slip = x·Σs`),
+  `trading_days`, `clamped`, `new_issue`. Every view — 48-bar seasonal, cumulative path, within-month
+  signature, and all phase-2 groupings — is a group-by on this one table.
 - **Metrics:** TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
   **100% = equal-DV01 / plain breakeven** baseline; lower β under-weights the UST leg). β is applied client-side per year-bucket
   before the median, so the slider is instant. Units are the engine's **bp** (= $/100k-DV01 P&L;
@@ -170,10 +171,19 @@ day to the left:
 ### Dashboard Seasonal sub-modes & filters
 
 The Seasonal view has four sub-modes (toggle) and the shared filters below, all computed
-client-side off the shipped `seas` table (so every control is instant). **Tenor is multi-select**
-(toggle, ≥1 on): with several tenors the **Chart** overlays one cumulative **long-BE** line per
-tenor (repo half-spread applied; per-tenor totals across the top) and the seasonal **Calendar**
-overlays one line per tenor; all other views use the first-selected (primary) tenor.
+client-side off the shipped `seas` table (so every control is instant). **Tenor is multi-select
+only where overlay is supported** — the **Chart** (one cumulative long/short-BE line per tenor,
+per-tenor totals across the top) and the seasonal **Calendar** (one median line per tenor). Every
+other view is **single-tenor**: clicking a tenor switches to it, and switching into such a view
+collapses the selection to the primary tenor (the label note reflects which mode you're in).
+
+**Repo half-spread sliders apply everywhere.** `x_TIPS` and `x_UST` now net the financing cost off
+**every** view — chart, table, and all six seasonal sub-modes — not just the chart. Each leg's cost
+is `x · Σ(sensitivity)` over the bucket/day (TIPS by `x_TIPS`, UST by `x_UST`; the breakeven scales
+the UST cost by β), subtracted as a cost in **both** long and short directions. Set both to 0 for
+the mid (zero-spread) series. The seasonal-table-based views (Aggregate / History / Predict / Cumul)
+use the bucket-summed `tips_slip / ust_slip`; the daily views (Calendar / Event) use daily `s_TIPS /
+s_UST`. The chart's date-range presets are now **Full / 5Y / 3Y**, matching the seasonal windows.
 
 **Position (Long / Short)** — a toggle shown on every cumulative view (all seasonal sub-modes +
 the multi-tenor Chart). **Long** is the default; **Short** mirrors the metric so you can read the

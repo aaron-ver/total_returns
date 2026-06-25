@@ -646,8 +646,10 @@ def month_anchors(year, month, cal=None, auction=None):
 
 def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
     """The keystone tidy long table (spec sec.7), one row per (year, month, period, tenor):
-      tips_pnl, ust_pnl  -- SUM of the engine's daily bp (DV01-normalized P&L) inside the bucket
-      trading_days       -- # days summed (0 -> empty/clamped bucket; pnl recorded NaN)
+      tips_pnl, ust_pnl   -- SUM of the engine's daily bp (DV01-normalized P&L) inside the bucket
+      tips_slip, ust_slip -- SUM of the per-day repo half-spread sensitivity (s_TIPS/s_UST) in the
+                             bucket, so the dashboard can net any (x_TIPS, x_UST): slip = x·Σs
+      trading_days        -- # days summed (0 -> empty/clamped bucket; pnl/slip recorded NaN)
       clamped            -- the month hit a clamp (short P3 / empty P4, or empty P1)
       new_issue          -- the month's anchoring TIPS auction is a NEW issue (else a reopening),
                             so the analysis can group/condition on new-issue vs reopening months
@@ -678,12 +680,16 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
                 mask = per == p
                 td = int(mask.sum())
                 if td == 0:
-                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, 0, bool(clamped), nw))
+                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, np.nan, np.nan, 0, bool(clamped), nw))
                 else:
                     rows.append((int(y), int(m), p, ten, float(sub["r_TIPS_bp"].to_numpy()[mask].sum()),
-                                 float(sub["r_UST_bp"].to_numpy()[mask].sum()), td, bool(clamped), nw))
+                                 float(sub["r_UST_bp"].to_numpy()[mask].sum()),
+                                 float(sub["s_TIPS"].to_numpy()[mask].sum()),   # Σ repo-half-spread sensitivity in the
+                                 float(sub["s_UST"].to_numpy()[mask].sum()),    # bucket -> seasonal views apply x_TIPS/x_UST
+                                 td, bool(clamped), nw))
     df = pd.DataFrame(rows, columns=["year", "month", "period", "tenor",
-                                     "tips_pnl", "ust_pnl", "trading_days", "clamped", "new_issue"])
+                                     "tips_pnl", "ust_pnl", "tips_slip", "ust_slip",
+                                     "trading_days", "clamped", "new_issue"])
     if early_hits:
         print(f"  [seasonal] early-auction clamp fired {len(early_hits)}x (front-of-month auctions, "
               f"e.g. {early_hits[0]}); P1 recorded empty for those months")
