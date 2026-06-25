@@ -463,8 +463,8 @@ function drawSeasonal(){
   const boxTr=[0,1,2,3].map(p=>{ const xs=[],ys=[],txt=[];
     for(let m=0;m<12;m++){ const k=m*4+p, vals=a.rawMP[k]||[], yrs=a.rawMPy[k]||[];
       for(let j=0;j<vals.length;j++){ xs.push(m*4+p); ys.push(vals[j]); txt.push(yrs[j]); } }
-    return {type:"box",name:"P"+(p+1),x:xs,y:ys,text:txt,boxmean:false,boxpoints:"outliers",
-      whiskerwidth:0.4,marker:{color:PCOL[p],size:3,opacity:.5},line:{color:PCOL[p],width:1},fillcolor:PCOL[p]+"22",
+    return {type:"box",name:"P"+(p+1),x:xs,y:ys,text:txt,boxmean:false,boxpoints:"all",jitter:0.5,pointpos:0,
+      whiskerwidth:0.4,marker:{color:PCOL[p],size:3,opacity:.4},line:{color:PCOL[p],width:1},fillcolor:PCOL[p]+"22",
       hovertemplate:"%{text} · P"+(p+1)+": %{y:+.2f} bp<extra></extra>"};});
   const mxx=[],myy=[];                                          // bright mean tick per box (high contrast)
   for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const k=m*4+p, arr=a.rawMP[k]||[]; if(arr.length){mxx.push(m*4+p); myy.push(mean(arr));} }
@@ -480,29 +480,41 @@ function drawSeasonal(){
     yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period P&L (bp)",range:yr||undefined},
     yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
     hovermode:"closest",legend:{orientation:"h",y:1.14,font:{size:10}}},{responsive:true,displaylogo:false});
-  // within-month signature: single window -> box per period (mean tick + points); multiple -> grouped median bars per window
+  // within-month signature: single window -> box per period (gold box-width mean line + points);
+  // multiple windows -> side-by-side box-and-whisker per window, grouped by period (native mean line)
   let sigTr, sigLayout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},
     yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"P&L (bp)"},xaxis:{gridcolor:"#2d3a48"}};
   if(wl.length===1){
-    sigTr=[1,2,3,4].map(p=>({type:"box",name:"P"+p,x:(a.rawP[p]||[]).map(()=>"P"+p),y:a.rawP[p]||[],text:a.rawPy[p]||[],
-      boxmean:false,boxpoints:"all",jitter:0.6,pointpos:0,marker:{color:PCOL[p-1],size:4,opacity:.45},line:{color:PCOL[p-1],width:1},fillcolor:PCOL[p-1]+"22",
+    // numeric x at p=1..4 with fixed box width so the mean can be drawn as a line spanning the box
+    sigTr=[1,2,3,4].map(p=>({type:"box",name:"P"+p,x:(a.rawP[p]||[]).map(()=>p),y:a.rawP[p]||[],text:a.rawPy[p]||[],
+      width:0.5,boxmean:false,boxpoints:"all",jitter:0.6,pointpos:0,marker:{color:PCOL[p-1],size:4,opacity:.45},line:{color:PCOL[p-1],width:1},fillcolor:PCOL[p-1]+"22",
       hovertemplate:"%{text} · P"+p+": %{y:+.3f} bp<extra></extra>"}));
-    sigTr.push({type:"scatter",mode:"markers",name:"mean",x:[1,2,3,4].map(p=>"P"+p),y:[1,2,3,4].map(p=>mean(a.rawP[p]||[])),marker:MEANMARK,hovertemplate:"mean %{y:+.3f} bp<extra></extra>"});
+    const mx=[],my=[];                                          // gold mean as a horizontal line the width of the box
+    [1,2,3,4].forEach(p=>{ const mv=mean(a.rawP[p]||[]); if(mv!=null){ mx.push(p-0.25,p+0.25,null); my.push(mv,mv,null); } });
+    sigTr.push({type:"scatter",mode:"lines",name:"mean",x:mx,y:my,line:{color:"#ffd633",width:3},hovertemplate:"mean %{y:+.3f} bp<extra></extra>"});
     sigLayout.showlegend=false; sigLayout.yaxis.range=poolRange([1,2,3,4].map(p=>a.rawP[p]||[]))||undefined;
-  } else { sigTr=wl.map(w=>{ const s=seasonalAgg(winCutOf(w));
-      return {type:"bar",name:WINLBL[w],x:["P1","P2","P3","P4"],y:s.sig,marker:{color:WINCOL[w]},
-        error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.3)",thickness:1,width:3},
-        customdata:s.sn.map((n,p)=>[PLAB[p],n]),hovertemplate:"%{customdata[0]} ["+WINLBL[w]+"]<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"};});
-    sigLayout.barmode="group"; sigLayout.showlegend=true; sigLayout.legend={orientation:"h",y:1.2,font:{size:10}};
+    sigLayout.xaxis={tickvals:[1,2,3,4],ticktext:["P1","P2","P3","P4"],gridcolor:"#2d3a48",range:[0.4,4.6]};
+  } else {
+    const aggs=wl.map(w=>seasonalAgg(winCutOf(w)));            // one box per (window, period), grouped by period
+    sigTr=wl.map((w,wi)=>{ const s=aggs[wi], xs=[],ys=[],tx=[];
+      [1,2,3,4].forEach(p=>{ const vals=s.rawP[p]||[], yrs=s.rawPy[p]||[]; for(let j=0;j<vals.length;j++){xs.push("P"+p);ys.push(vals[j]);tx.push(yrs[j]);} });
+      return {type:"box",name:WINLBL[w],x:xs,y:ys,text:tx,boxmean:true,boxpoints:"all",jitter:0.5,pointpos:0,whiskerwidth:0.4,
+        marker:{color:WINCOL[w],size:3,opacity:.4},line:{color:WINCOL[w],width:1},fillcolor:WINCOL[w]+"22",
+        hovertemplate:"%{text} · %{x} ["+WINLBL[w]+"]: %{y:+.3f} bp<extra></extra>"};});
+    sigLayout.boxmode="group"; sigLayout.showlegend=true; sigLayout.legend={orientation:"h",y:1.2,font:{size:10}};
+    const pools=[]; aggs.forEach(s=>[1,2,3,4].forEach(p=>pools.push(s.rawP[p]||[]))); sigLayout.yaxis.range=poolRange(pools)||undefined;
   }
   Plotly.react("seassig",sigTr,sigLayout,{responsive:true,displaylogo:false});
   const desc=S.smetric==="be"?("<b>Breakeven = TIPS − "+S.beta+"%·UST</b> (β=100% is the plain DV01-matched breakeven)")
                              :("<b>"+MNAME[S.smetric]+"</b> leg");
   $("seascap").innerHTML="Showing "+desc+" per auction-cycle period — <b>"+filtDesc()+"</b>. Each <b>box</b> = "
     +"the across-years distribution of that bucket's summed P&L (bp on 100k DV01; ×$100k = $): box = 25–75th "
-    +"(IQR), whiskers = 1.5×IQR, solid line = median, dashed = <b>mean</b>; faint points = each year (hover for "
-    +"year + value). Gold = cumulative Σ-median path. Split around the month's single TIPS auction (A0..A4, ±1w)."
-    +(winList().length>1?" Signature compares your selected windows (grouped median bars).":"");
+    +"(IQR), solid line = median, bright-yellow ┃ = <b>mean</b>. The <b>whiskers (the &lsquo;fence&rsquo;)</b> "
+    +"reach the furthest year still within <b>1.5×IQR</b> of the nearer quartile (the Tukey fence); any year "
+    +"beyond it is a statistical outlier. <b>Every year is plotted as a faint jittered point</b> (hover for "
+    +"year + value), so you see the full sample, not just the outliers. Gold line = cumulative Σ-median path. "
+    +"Split around the month's single TIPS auction (A0..A4, ±1w)."
+    +(winList().length>1?" Signature compares your selected windows (side-by-side box-and-whisker per period).":"");
 }
 function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one

@@ -195,7 +195,8 @@ Chart's long/short lines). At `x_TIPS = x_UST = 0` the two coincide exactly. Tit
 - **Aggregate** — box-and-whisker per (month, period): box = IQR, whiskers = 1.5×IQR, solid =
   median, **bright-yellow tick = mean**, outlier years shown as points (hover → year + value);
   y-axis **rescaled to p1–p99** so the boxes fill the panel. + cumulative path + the within-month
-  signature (per-period boxes; grouped median bars when comparing windows).
+  signature (per-period box-and-whisker; one window shows a **gold box-width mean line** + the year
+  points, several windows show **side-by-side box-and-whisker** per period for degradation comparison).
 - **History** — each `(year, month, period)` bucket as a point over time (high-contrast lines,
   x = year), with period **checkboxes** + Month filter (e.g. P1 + all months = every P1 over time;
   P3 + Jan = each January's P3). Dashed line = median of the selection.
@@ -236,8 +237,9 @@ Shared filters (apply to all sub-modes):
   slider is instant. Units = engine **bp** (= $/100k-DV01 P&L; ×$100k = dollars).
 - **Sample window(s)** — **Full / 5Y / 3Y** as **checkboxes** (multi-select). Check several to
   **overlay/compare** them in the views where that's readable: the within-month **signature**
-  (grouped bars per window), **Calendar** (a line per window), and **Predict** (a table block per
-  window). The dense views (48-bar, History, Predict scatter) use the **longest** selected window.
+  (side-by-side box-and-whisker per window), **Calendar** (a line per window), and **Predict** (a
+  table block per window). The dense views (48-bar, History, Predict scatter) use the **longest**
+  selected window.
   3Y is the degraded-signal check — the auction-cycle signal weakens markedly in recent windows
   while the calendar effect persists.
 - **Issue type** — **All / New / Reopen** (an *auction-month* filter, **not** a bond filter). Each
