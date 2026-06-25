@@ -172,10 +172,16 @@ __PLOTLY__
     <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">75</span>%
       &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 plain)</span></label>
       <input type="range" id="beta" min="0" max="150" step="5" value="75"></div>
-    <div class="grp sv" style="display:none"><label>Sample window</label><div class="seg" id="swin">
-      <button data-swin="full" class="on">Full</button><button data-swin="5y">5Y</button><button data-swin="3y">3Y</button></div></div>
+    <div class="grp sv" style="display:none"><label>Sample window(s)</label>
+      <div class="checks" id="swin">
+        <label><input type="checkbox" value="full" checked><span class="sw" style="background:#2f81f7"></span><b>Full</b><span class="rng">2011 → now</span></label>
+        <label><input type="checkbox" value="5y"><span class="sw" style="background:#f5a623"></span><b>5Y</b><span class="rng">last 5 years</span></label>
+        <label><input type="checkbox" value="3y"><span class="sw" style="background:#e63946"></span><b>3Y</b><span class="rng">last 3 years</span></label>
+      </div></div>
     <div class="grp sv" style="display:none"><label>Issue type (auction)</label><div class="seg" id="issue">
       <button data-issue="all" class="on">All</button><button data-issue="new">New</button><button data-issue="reopen">Reopen</button></div></div>
+    <div class="grp cv" style="display:none"><label>Day count</label><div class="seg" id="calend">
+      <button data-calend="start" class="on">From start</button><button data-calend="end">From end</button></div></div>
     <div class="grp sv" style="display:none"><label>Seasonal view</label><div class="seg sm4" id="seasmode">
       <button data-seasmode="agg" class="on">Aggregate</button><button data-seasmode="hist">History</button>
       <button data-seasmode="cal">Calendar</button><button data-seasmode="reg">Predict</button></div></div>
@@ -187,14 +193,15 @@ __PLOTLY__
         <label><input type="checkbox" value="4" checked><span class="sw" style="background:#c77dff"></span><b>P4</b><span class="rng">auction+1w → m/e</span></label>
       </div></div>
     <div class="grp mv" style="display:none"><label>Month</label>
-      <select id="smonth"><option value="all">All months</option><option value="1">Jan</option><option value="2">Feb</option>
+      <select id="smonth"><option value="all">All months</option><option value="h1">H1 (Jan–Jun)</option><option value="h2">H2 (Jul–Dec)</option><option value="1">Jan</option><option value="2">Feb</option>
         <option value="3">Mar</option><option value="4">Apr</option><option value="5">May</option><option value="6">Jun</option>
         <option value="7">Jul</option><option value="8">Aug</option><option value="9">Sep</option><option value="10">Oct</option>
         <option value="11">Nov</option><option value="12">Dec</option></select></div>
     <div class="grp pv" style="display:none"><label>Regression to plot</label>
       <select id="regpair"><option value="P1>P2">P1 → P2</option><option value="P2>P3">P2 → P3</option>
-        <option value="P3>P4">P3 → P4</option><option value="P12>P3">P1+P2 → P3</option>
-        <option value="P12>P34">P1+P2 → P3+P4</option></select></div>
+        <option value="P3>P4">P3 → P4</option><option value="P23>P4">P2+P3 → P4</option>
+        <option value="P12>P3">P1+P2 → P3</option><option value="P12>P34">P1+P2 → P3+P4</option>
+        <option value="P4>P1n">P4 → next-month P1</option></select></div>
     <button class="act rv" id="dl">Download CSV (window)</button>
     <p class="note">Long-BE = long TIPS / short UST. Both directions carry the slippage
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
@@ -233,7 +240,7 @@ __PLOTLY__
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swin:"full", issue:"all", regpair:"P1>P2"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swins:["full"], calend:"start", issue:"all", regpair:"P1>P2"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -276,6 +283,7 @@ function applyView(){
   document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
   document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&mode==="hist")?"":"none");      // periods (history)
   document.querySelectorAll(".mv").forEach(e=>e.style.display=(seasonal&&mode!=="agg")?"":"none");        // month (hist/cal/reg)
+  document.querySelectorAll(".cv").forEach(e=>e.style.display=(seasonal&&mode==="cal")?"":"none");        // day-count (calendar)
   document.querySelectorAll(".pv").forEach(e=>e.style.display=(seasonal&&mode==="reg")?"":"none");        // regression picker
   $("betagrp").classList.toggle("off", seasonal && S.smetric!=="be");   // β only acts on Breakeven
   $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
@@ -311,28 +319,33 @@ function drawChart(s){
 }
 function median(a){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),n=b.length,h=n>>1; return n%2?b[h]:(b[h-1]+b[h])/2; }
 function quantile(a,q){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),pos=(b.length-1)*q,lo=Math.floor(pos); return b[lo]+((b[lo+1]??b[lo])-b[lo])*(pos-lo); }
-// --- shared seasonal filters: sample window (Full/5Y/3Y), issue type (new/reopen), month ---
+// --- shared seasonal filters: sample window(s) Full/5Y/3Y, issue type new/reopen, month/H1/H2 ---
+const WINS={"full":0,"5y":60,"3y":36}, WINCOL={"full":"#2f81f7","5y":"#f5a623","3y":"#e63946"}, WINLBL={"full":"Full","5y":"5Y","3y":"3Y"};
 function lastYM(){ const s=DATA[S.tenor].seas; let mx=0; for(let i=0;i<s.y.length;i++){const k=s.y[i]*12+s.m[i]; if(k>mx)mx=k;} return mx; }
-function winCut(){ return S.swin==="full" ? 0 : lastYM()-((S.swin==="3y"?36:60)-1); }   // min y*12+m allowed
-function rowPass(s,i,withMonth){                              // s = DATA[tenor].seas, i = row index
+function winCutOf(w){ return w==="full" ? 0 : lastYM()-(WINS[w]-1); }      // min y*12+m for window w
+function winList(){ const l=["full","5y","3y"].filter(w=>S.swins.includes(w)); return l.length?l:["full"]; }
+function winMain(){ return winList()[0]; }                                 // longest selected (full>5y>3y): dense views
+function monthPass(m){ if(S.smonth==="all")return true; if(S.smonth==="h1")return m<=6; if(S.smonth==="h2")return m>=7; return m===+S.smonth; }
+function monthLbl(){ return S.smonth==="all"?"all months":S.smonth==="h1"?"H1 (Jan–Jun)":S.smonth==="h2"?"H2 (Jul–Dec)":MONTHS[+S.smonth-1]; }
+function rowPass(s,i,withMonth,cut){                          // s = DATA[tenor].seas, i = row index, cut = winCutOf(w)
   if(S.issue==="new" && !s.n[i]) return false;
   if(S.issue==="reopen" && s.n[i]) return false;
-  const c=winCut(); if(c && (s.y[i]*12+s.m[i])<c) return false;
-  if(withMonth && S.smonth!=="all" && s.m[i]!==+S.smonth) return false;
+  if(cut && (s.y[i]*12+s.m[i])<cut) return false;
+  if(withMonth && !monthPass(s.m[i])) return false;
   return true;
 }
-function filtDesc(){ return (S.swin==="full"?"full sample":"last "+S.swin)
+function filtDesc(){ return winList().map(w=>WINLBL[w]).join("+")+" sample"
   + (S.issue==="all"?"":", "+(S.issue==="new"?"new-issue":"reopening")+" months"); }
-function seasonalAgg(){
-  // Pure group-by on the keystone bucket table: per (year,month,period) we have the bucket-SUMMED
-  // leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=t-(β/100)·u. Stack across YEARS with the
-  // median per (month,period); carry IQR (q25..q75) and n. Empty/clamped buckets (null) drop out.
+function seasonalAgg(cut){
+  // Pure group-by on the keystone bucket table for one sample window (cut = min y*12+m, 0=full):
+  // per (year,month,period) the bucket-SUMMED leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=
+  // t-(β/100)·u. Stack across YEARS with the median per (month,period); IQR (q25..q75) + n.
   const sd=DATA[S.tenor].seas, beta=S.beta/100;
   const valOf=i=>{ const t=sd.t[i],u=sd.u[i];
     if(S.smetric==="tips")return t; if(S.smetric==="nom")return u;
     return (t==null||u==null)?null:t-beta*u; };
   const byMP={}, byP={1:[],2:[],3:[],4:[]}, clMP={};
-  for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false))continue;   // window + issue (not month: this IS the by-month view)
+  for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false,cut))continue;   // window + issue (not month: this IS the by-month view)
     const v=valOf(i); if(v==null)continue;
     const m=sd.m[i],p=sd.p[i],k=(m-1)*4+(p-1);
     (byMP[k]=byMP[k]||[]).push(v); byP[p].push(v); if(sd.c[i])clMP[k]=(clMP[k]||0)+1; }
@@ -348,7 +361,7 @@ function seasonalAgg(){
 }
 const MNAME={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
 function drawSeasonal(){
-  const a=seasonalAgg();
+  const wl=winList(), a=seasonalAgg(winCutOf(winMain()));     // 48-bar uses the longest selected window
   const barTr=[0,1,2,3].map(p=>({type:"bar",name:PLAB[p],x:MONTHS.map((_,m)=>m*4+p),y:a.med[p],
     marker:{color:PCOL[p]},width:0.92,
     error_y:{type:"data",symmetric:false,array:a.med[p].map((v,m)=>v==null?0:a.q3[p][m]-v),
@@ -360,16 +373,24 @@ function drawSeasonal(){
   const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
   Plotly.react("seastop",[...barTr,cumTr],{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},
-    barmode:"overlay",title:{text:S.tenor+" — "+mname+" per auction-cycle period (median bp over years)",font:{size:13}},
+    barmode:"overlay",title:{text:S.tenor+" — "+mname+" per auction-cycle period (median bp, "+WINLBL[winMain()]+" window)",font:{size:13}},
     xaxis:{tickvals:MONTHS.map((_,m)=>m*4+1.5),ticktext:MONTHS,gridcolor:"#2d3a48",range:[-0.6,47.6]},
     yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period median (bp)"},
     yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
     hovermode:"closest",legend:{orientation:"h",y:1.14,font:{size:10}}},{responsive:true,displaylogo:false});
-  Plotly.react("seassig",[{type:"bar",x:["P1","P2","P3","P4"],y:a.sig,marker:{color:PCOL},width:0.6,
-    error_y:{type:"data",symmetric:false,array:a.sig.map((v,p)=>v==null?0:a.sq3[p]-v),
-             arrayminus:a.sig.map((v,p)=>v==null?0:v-a.sq1[p]),color:"rgba(230,237,243,.4)",thickness:1.2,width:4},
-    customdata:PLAB.map((l,p)=>[l,a.sn[p]]),hovertemplate:"%{customdata[0]}<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"}],{
-    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},
+  // within-month signature: one bar per period (single window, period-coloured) OR grouped by window
+  let sigTr;
+  if(wl.length===1){ const s=a;
+    sigTr=[{type:"bar",x:["P1","P2","P3","P4"],y:s.sig,marker:{color:PCOL},width:0.6,
+      error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.4)",thickness:1.2,width:4},
+      customdata:PLAB.map((l,p)=>[l,s.sn[p]]),hovertemplate:"%{customdata[0]}<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"}];
+  } else { sigTr=wl.map(w=>{ const s=seasonalAgg(winCutOf(w));
+      return {type:"bar",name:WINLBL[w],x:["P1","P2","P3","P4"],y:s.sig,marker:{color:WINCOL[w]},
+        error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.3)",thickness:1,width:3},
+        customdata:s.sn.map((n,p)=>[PLAB[p],n]),hovertemplate:"%{customdata[0]} ["+WINLBL[w]+"]<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"};}); }
+  Plotly.react("seassig",sigTr,{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},barmode:"group",
+    showlegend:wl.length>1,legend:{orientation:"h",y:1.2,font:{size:10}},
     yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"median (bp)"},xaxis:{gridcolor:"#2d3a48"}},
     {responsive:true,displaylogo:false});
   const desc=S.smetric==="be"?("<b>Breakeven = TIPS − "+S.beta+"%·UST</b> (β=100% is the plain DV01-matched breakeven)")
@@ -381,13 +402,13 @@ function drawSeasonal(){
 function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
   // period and/or one calendar month, returned per period sorted chronologically.
-  const sd=DATA[S.tenor].seas, beta=S.beta/100, pday=[4,11,18,25];   // day-of-month to place each period
+  const sd=DATA[S.tenor].seas, beta=S.beta/100, pday=[4,11,18,25], cut=winCutOf(winMain());   // day-of-month to place each period
   const valOf=(t,u)=>S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u);
   const byP={1:[],2:[],3:[],4:[]};
   for(let i=0;i<sd.y.length;i++){
     const p=sd.p[i],m=sd.m[i],y=sd.y[i];
     if(!S.periods.includes(p)) continue;
-    if(!rowPass(sd,i,true)) continue;             // window + issue + month
+    if(!rowPass(sd,i,true,cut)) continue;             // window + issue + month
     const v=valOf(sd.t[i],sd.u[i]); if(v==null) continue;
     byP[p].push({x:y+"-"+String(m).padStart(2,"0")+"-"+String(pday[p-1]).padStart(2,"0"),v:v});
   }
@@ -407,7 +428,7 @@ function drawHistory(){
   }
   const med=median(all);
   const mname=MNAME2[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
-  const perlbl=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join(",")||"none", monthlbl=S.smonth==="all"?"all months":MONTHS[+S.smonth-1];
+  const perlbl=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join(",")||"none", monthlbl=monthLbl();
   Plotly.react("histchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:36,b:40},
     title:{text:S.tenor+" — "+mname+" per bucket over time ("+perlbl+", "+monthlbl+")",font:{size:13}},
@@ -424,63 +445,80 @@ function drawHistory(){
 }
 // ============ Calendar effect: average daily P&L by business-day-of-month ============
 function ymNewMap(){ const s=DATA[S.tenor].seas,mp={}; for(let i=0;i<s.y.length;i++)mp[s.y[i]*12+s.m[i]]=s.n[i]; return mp; }
-function seasonalCalendar(){
-  // Per-DAY (not per-period): tag each day with its business-day-of-month (BDOM, its ordinal among
-  // the trading days of its month) and aggregate the metric by BDOM across the filtered sample.
-  const d=DATA[S.tenor], beta=S.beta/100, nm=ymNewMap(), cut=winCut();
+function seasonalCalendar(cut){
+  // Per-DAY: tag each day with its business-day-of-month (its ordinal among the trading days of its
+  // month) and aggregate the metric by that key across the filtered sample. S.calend="end" counts
+  // from the LAST trading day (key −1 = last day, −2 = second-last) so month-ends align across months
+  // (turn-of-month) instead of smearing at the high forward-BDOMs (months run 19–23 trading days).
+  const d=DATA[S.tenor], beta=S.beta/100, nm=ymNewMap();
   const valOf=i=>S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i];
+  const T={}; for(let i=0;i<d.dates.length;i++){const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // trading days/month
   const byB={}; let curYM="", bd=0;
   for(let i=0;i<d.dates.length;i++){
     const ds=d.dates[i], ym=ds.slice(0,7);
-    if(ym!==curYM){curYM=ym; bd=0;} bd++;                       // BDOM counts every trading day in the month
-    const y=+ds.slice(0,4), m=+ds.slice(5,7), key=y*12+m;
-    if(S.smonth!=="all" && m!==+S.smonth) continue;
+    if(ym!==curYM){curYM=ym; bd=0;} bd++;                       // counts every trading day in the month
+    const m=+ds.slice(5,7), key=(+ds.slice(0,4))*12+m;
+    if(!monthPass(m)) continue;
     if(S.issue==="new" && !nm[key]) continue;
     if(S.issue==="reopen" && nm[key]) continue;
     if(cut && key<cut) continue;
     const v=valOf(i); if(v==null||isNaN(v)) continue;
-    (byB[bd]=byB[bd]||[]).push(v);
+    const bk = S.calend==="end" ? (bd - T[ym] - 1) : bd;        // from end: last day -> -1
+    (byB[bk]=byB[bk]||[]).push(v);
   }
-  const bdoms=Object.keys(byB).map(Number).sort((a,b)=>a-b);
-  const med=bdoms.map(b=>median(byB[b])), q1=bdoms.map(b=>quantile(byB[b],0.25)),
-        q3=bdoms.map(b=>quantile(byB[b],0.75)), ns=bdoms.map(b=>byB[b].length);
+  const keys=Object.keys(byB).map(Number).sort((a,b)=>a-b);
+  const med=keys.map(b=>median(byB[b])), q1=keys.map(b=>quantile(byB[b],0.25)),
+        q3=keys.map(b=>quantile(byB[b],0.75)), ns=keys.map(b=>byB[b].length);
   let c=0; const cum=med.map(v=>{c+=(v||0); return c;});
-  return {bdoms,med,q1,q3,ns,cum};
+  return {keys,med,q1,q3,ns,cum};
 }
 function drawCalendar(){
-  const a=seasonalCalendar(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
-  const bars={type:"bar",name:"median",x:a.bdoms,y:a.med,marker:{color:"#2f81f7"},
-    error_y:{type:"data",symmetric:false,array:a.med.map((v,i)=>v==null?0:a.q3[i]-v),
-             arrayminus:a.med.map((v,i)=>v==null?0:v-a.q1[i]),color:"rgba(230,237,243,.22)",thickness:1,width:0},
-    customdata:a.ns,hovertemplate:"business day %{x}: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};
-  const cum={type:"scatter",mode:"lines",name:"cumulative",yaxis:"y2",x:a.bdoms,y:a.cum,
-    line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.2f} bp<extra></extra>"};
-  Plotly.react("seascalchart",[bars,cum],{
-    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:42},
-    title:{text:S.tenor+" — "+mname+" by business day of month (median)",font:{size:13}},
-    xaxis:{title:"business day of month  (1 = first trading day)",gridcolor:"#2d3a48",dtick:1},
+  const wl=winList(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  const xtitle = S.calend==="end" ? "business day from month-end  (−1 = last trading day)"
+                                  : "business day of month  (1 = first trading day)";
+  let traces, layout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:42},
+    title:{text:S.tenor+" — "+mname+" by "+(S.calend==="end"?"day-from-month-end":"business day of month")+" (median)",font:{size:13}},
+    xaxis:{title:xtitle,gridcolor:"#2d3a48",dtick:1},
     yaxis:{title:"median daily P&L (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
-    yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
-    hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}}},{responsive:true,displaylogo:false});
-  $("calcap").innerHTML="The <b>calendar effect</b>: average daily P&L by <b>business day of month</b>, "
-    +"independent of the auction cycle — <b>"+filtDesc()+"</b>, "+(S.smonth==="all"?"all months":MONTHS[+S.smonth-1])
-    +". Bars = median across the sample (whiskers 25–75th); gold = cumulative within-month path. Pick a month at left to isolate it.";
+    hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}}};
+  if(wl.length===1){                                            // single window: bars + cumulative path
+    const a=seasonalCalendar(winCutOf(wl[0]));
+    traces=[{type:"bar",name:"median",x:a.keys,y:a.med,marker:{color:"#2f81f7"},
+      error_y:{type:"data",symmetric:false,array:a.med.map((v,i)=>v==null?0:a.q3[i]-v),arrayminus:a.med.map((v,i)=>v==null?0:v-a.q1[i]),color:"rgba(230,237,243,.22)",thickness:1,width:0},
+      customdata:a.ns,hovertemplate:"day %{x}: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"},
+      {type:"scatter",mode:"lines",name:"cumulative",yaxis:"y2",x:a.keys,y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.2f} bp<extra></extra>"}];
+    layout.yaxis2={overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false};
+  } else {                                                      // multiple windows: one median line each
+    traces=wl.map(w=>{ const a=seasonalCalendar(winCutOf(w));
+      return {type:"scatter",mode:"lines+markers",name:WINLBL[w],x:a.keys,y:a.med,line:{color:WINCOL[w],width:1.6},marker:{size:4,color:WINCOL[w]},
+        customdata:a.ns,hovertemplate:"day %{x} ["+WINLBL[w]+"]: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};});
+  }
+  Plotly.react("seascalchart",traces,layout,{responsive:true,displaylogo:false});
+  $("calcap").innerHTML="The <b>calendar effect</b>: median daily P&L by <b>"+(S.calend==="end"?"day from month-end":"business day of month")
+    +"</b>, independent of the auction cycle — <b>"+filtDesc()+"</b>, "+monthLbl()
+    +(wl.length===1?". Bars = median (whiskers 25–75th); gold = cumulative within-month path."
+                   :". One line per sample window (compare degradation).")
+    +" Note x = trading days (≈19–23/month), not calendar dates; use From-end to align the turn-of-month.";
 }
 // ============ Predict: OLS regressions between within-month periods ============
 function rowVal(s,i){ const beta=S.beta/100,t=s.t[i],u=s.u[i];
   return S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); }
-function monthBuckets(){                                        // {ym: {1:v,2:v,3:v,4:v}} over filtered months
+function monthBuckets(cut, withFilters){                        // {ym:{1,2,3,4}}; withFilters=issue+month, else window-only
   const s=DATA[S.tenor].seas, out={};
-  for(let i=0;i<s.y.length;i++){ if(!rowPass(s,i,true))continue; const v=rowVal(s,i); if(v==null)continue;
+  for(let i=0;i<s.y.length;i++){
+    if(withFilters ? !rowPass(s,i,true,cut) : (cut && (s.y[i]*12+s.m[i])<cut)) continue;
+    const v=rowVal(s,i); if(v==null)continue;
     const ym=s.y[i]*12+s.m[i]; (out[ym]=out[ym]||{})[s.p[i]]=v; }
   return out;
 }
-const REGS=[
+const REGS=[                                                    // cross:true -> target is NEXT month's bucket
   {key:"P1>P2",lab:"P1 → P2",fx:b=>b[1],fy:b=>b[2]},
   {key:"P2>P3",lab:"P2 → P3",fx:b=>b[2],fy:b=>b[3]},
   {key:"P3>P4",lab:"P3 → P4",fx:b=>b[3],fy:b=>b[4]},
+  {key:"P23>P4",lab:"P2+P3 → P4",fx:b=>b[2]+b[3],fy:b=>b[4]},
   {key:"P12>P3",lab:"P1+P2 → P3",fx:b=>b[1]+b[2],fy:b=>b[3]},
   {key:"P12>P34",lab:"P1+P2 → P3+P4",fx:b=>b[1]+b[2],fy:b=>b[3]+b[4]},
+  {key:"P4>P1n",lab:"P4 → next-month P1",cross:true,fx:b=>b[4],fy:b=>b[1]},
 ];
 function ols(xs,ys){
   const n=xs.length; if(n<3)return null;
@@ -492,22 +530,29 @@ function ols(xs,ys){
   const sse=Math.max(ssyy-b*ssxy,0),seb=Math.sqrt(sse/Math.max(n-2,1)/ssxx),t=seb>0?b/seb:0;
   return {n,a,b,r,r2,t};
 }
-function regResults(){
-  const mb=monthBuckets();
+function regResults(cut){
+  const mbF=monthBuckets(cut,true), mbW=monthBuckets(cut,false);   // filtered (predictor) + window-only (next-month target)
   return REGS.map(R=>{ const xs=[],ys=[];
-    for(const ym in mb){ const b=mb[ym],xv=R.fx(b),yv=R.fy(b);
+    for(const ym in mbF){ const b=mbF[ym], tb=R.cross?mbW[(+ym)+1]:b;   // cross: target = next calendar month
+      if(!tb) continue;
+      const xv=R.fx(b), yv=R.fy(tb);
       if(xv==null||yv==null||isNaN(xv)||isNaN(yv))continue; xs.push(xv); ys.push(yv); }
     return {key:R.key,lab:R.lab,xs,ys,f:ols(xs,ys)}; });
 }
-function drawPredict(){
-  const res=regResults();
+function regTable(res){
   let h="<table><thead><tr><th>relationship</th><th>n</th><th>slope</th><th>R²</th><th>corr</th><th>t-stat</th></tr></thead><tbody>";
   for(const r of res){ const f=r.f;
     h+="<tr><td>"+r.lab+"</td>"+(f?("<td>"+f.n+"</td><td>"+f.b.toFixed(3)+"</td><td>"+f.r2.toFixed(3)
       +"</td><td>"+f.r.toFixed(3)+"</td><td class='"+(Math.abs(f.t)>2?"pos":"")+"'>"+f.t.toFixed(2)+"</td>")
       :"<td colspan='5'>n/a (need ≥3 months)</td>")+"</tr>"; }
-  $("regtablewrap").innerHTML=h+"</tbody></table>";
-  const sel=res.find(r=>r.key===S.regpair)||res[0], f=sel.f;
+  return h+"</tbody></table>";
+}
+function drawPredict(){
+  const wl=winList();
+  $("regtablewrap").innerHTML = wl.map(w=>
+    (wl.length>1?"<div class='note' style='padding:2px 0 0'><b style='color:"+WINCOL[w]+"'>"+WINLBL[w]+" window</b></div>":"")
+    + regTable(regResults(winCutOf(w)))).join("");
+  const res=regResults(winCutOf(winMain())), sel=res.find(r=>r.key===S.regpair)||res[0], f=sel.f;
   const traces=[{type:"scatter",mode:"markers",name:"months",x:sel.xs,y:sel.ys,
     marker:{color:"#2f81f7",size:6,opacity:.7},hovertemplate:"predictor %{x:+.2f} → target %{y:+.2f} bp<extra></extra>"}];
   if(f){ const xmn=Math.min(...sel.xs),xmx=Math.max(...sel.xs);
@@ -515,14 +560,15 @@ function drawPredict(){
   const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
   Plotly.react("regchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:34,b:42},
-    title:{text:sel.lab+"   ("+mname+", "+filtDesc()+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
+    title:{text:sel.lab+"   ("+mname+", "+WINLBL[winMain()]+" window"+(S.smonth==="all"?"":", "+monthLbl())+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
     xaxis:{title:"predictor (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     yaxis:{title:"target (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     hovermode:"closest",showlegend:false},{responsive:true,displaylogo:false});
   $("regcap").innerHTML="Does early-month performance predict later? Each point = one month ("+filtDesc()
-    +(S.smonth==="all"?"":", "+MONTHS[+S.smonth-1])+"); OLS of target on predictor, bucket P&L in bp. "
-    +"|t|&gt;2 (~5% significance) highlighted green. Pick which relationship to plot at left. "
-    +"Month / Issue-type / Sample filters condition the regression.";
+    +(S.smonth==="all"?"":", "+monthLbl())+"); OLS of target on predictor, bucket P&L in bp. "
+    +"<b>P4 → next-month P1</b> is cross-month (this month's P4 vs the <i>following</i> month's P1; filters apply to the P4 month). "
+    +"|t|&gt;2 (~5% significance) highlighted green. Pick which relationship to plot at left; with multiple windows "
+    +"the table compares them (scatter shows the "+WINLBL[winMain()]+" window). Month / Issue / Sample condition the regression.";
 }
 function drawTable(s){
   const cols=["period","TIPS","UST","BEmid","longBE","shortBE"];
@@ -558,9 +604,11 @@ const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("but
 tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.tenor;
   tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
-seg("swin","swin"); seg("issue","issue");
+seg("issue","issue"); seg("calend","calend");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
   S.periods=[...$("speriod").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
+$("swin").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
+  S.swins=[...$("swin").querySelectorAll("input:checked")].map(x=>x.value); render(); });
 $("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); scheduleRender();};
 $("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); scheduleRender();};
 $("beta").oninput=e=>{S.beta=+e.target.value; $("betav").textContent=S.beta; scheduleRender();};

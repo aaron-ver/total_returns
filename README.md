@@ -177,27 +177,39 @@ off the shipped `seas` table (so every control is instant):
   P3 + Jan = each January's P3). Dashed line = median of the selection.
 - **Calendar** — the **calendar effect**: median daily P&L by **business-day-of-month** (BDOM),
   *independent of the auction cycle* (the desk's point that the calendar effect now dominates).
-  Bars by BDOM + cumulative within-month path; Month filter to isolate one month. (BDOM = a day's
-  ordinal among its month's trading days; the month-end BDOMs have lower `n` since months run
-  19–23 trading days.)
-- **Predict** — OLS regressions across months: **P1→P2, P2→P3, P3→P4, (P1+P2)→P3, (P1+P2)→(P3+P4)**
-  — does early-month performance predict later? Table of slope / R² / corr / t-stat / n (|t|>2
-  flagged) + a scatter with the OLS line (pick the relationship at left). Each observation is one
-  month; respects metric/β and all filters. Start with linear OLS; richer models later.
+  BDOM = a day's ordinal among its month's **trading** days, so the axis runs ~1–23 (not 1–31) and
+  high BDOMs have lower `n` (months run 19–23 trading days). A **From start / From end** toggle
+  flips the count: *from end* keys the last trading day as −1, −2, … so **month-ends align** across
+  months — the clean way to read the turn-of-month effect (which otherwise smears at BDOM 20–23).
+  Bars + cumulative within-month path; Month filter to isolate one month.
+- **Predict** — OLS regressions across months: **P1→P2, P2→P3, P3→P4, P2+P3→P4, (P1+P2)→P3,
+  (P1+P2)→(P3+P4)**, plus the **cross-month P4→next-month P1** (this month's end vs next month's
+  start; filters anchor on the P4 month) — does early performance predict later? Table of slope /
+  R² / corr / t-stat / n (|t|>2 flagged) + a scatter with the OLS line (pick the relationship at
+  left). Each observation is one month; respects metric/β and all filters. With multiple windows
+  the table shows a block per window (degradation comparison). Linear OLS first; richer models later.
 
 Shared filters (apply to all sub-modes):
 - **Metric** — TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
   75%; β = 100% = plain DV01-matched). β applied per year-bucket *before* the median, so the
   slider is instant. Units = engine **bp** (= $/100k-DV01 P&L; ×$100k = dollars).
-- **Sample window** — **Full / 5Y / 3Y** (3Y as a degraded-signal check; the auction-cycle signal
-  weakens markedly in recent windows while the calendar effect persists).
-- **Issue type** — **All / New / Reopen**. Each month's anchoring TIPS auction is tagged
-  `new_issue` (vs reopening) in the keystone table — new-issue months are Jan (10y), Feb (30y),
-  Apr (5y), Jul (10y), Oct (5y); the rest are reopenings (derived from the auction's `reopening`
-  flag per year, so it correctly reflects regime changes, e.g. the 5y Oct auction was a reopening
-  pre-2019, a new issue after). This is a clean per-month binary label — **not** bond/index
-  filtering — so it composes with the period/month/window filters without disturbing the monthly
-  anchor structure. (Conditioning regressions/calendar on new-vs-reopen is just toggling this.)
+- **Sample window(s)** — **Full / 5Y / 3Y** as **checkboxes** (multi-select). Check several to
+  **overlay/compare** them in the views where that's readable: the within-month **signature**
+  (grouped bars per window), **Calendar** (a line per window), and **Predict** (a table block per
+  window). The dense views (48-bar, History, Predict scatter) use the **longest** selected window.
+  3Y is the degraded-signal check — the auction-cycle signal weakens markedly in recent windows
+  while the calendar effect persists.
+- **Issue type** — **All / New / Reopen** (an *auction-month* filter, **not** a bond filter). Each
+  month's single anchoring TIPS auction is tagged `new_issue` vs reopening — new-issue months are
+  **Jan (10y), Feb (30y), Apr (5y), Jul (10y), Oct (5y)**; the other 7 are reopenings. Because the
+  anchor is the *shared* monthly auction, these are the **same calendar months for every tenor**
+  (viewing 30y with Issue=New shows 30y returns in those 5 months). Derived from the `reopening`
+  flag per year, so it tracks regime changes (the 5y Oct auction was a reopening pre-2019, a new
+  issue after). All = New + Reopen = all 12 months. Composes with month/window/period — so
+  "P2→P3 for new-issue months, last 5y" is just three toggles.
+- **Month** — All / **H1 (Jan–Jun)** / **H2 (Jul–Dec)** / a specific month (History, Calendar,
+  Predict). H1/H2 added as the easy seasonal-half conditioning; richer conditioning (rate/inflation
+  regime, pre/post structural breaks, CPI-release alignment) needs desk-defined cut points — TBD.
 
 - **QA** (`python engine.py seasonal`): auction day-of-month range (early-clamp guard), seam
   continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (±1-week span),
