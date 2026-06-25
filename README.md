@@ -171,12 +171,21 @@ day to the left:
 
 The Seasonal view has four sub-modes (toggle) and the shared filters below, all computed
 client-side off the shipped `seas` table (so every control is instant). **Tenor is multi-select**
-(toggle, ≥1 on): with several tenors the **Chart** and the seasonal **Calendar** overlay one line
-per tenor; all other views use the first-selected (primary) tenor.
+(toggle, ≥1 on): with several tenors the **Chart** overlays one cumulative **long-BE** line per
+tenor (repo half-spread applied; per-tenor totals across the top) and the seasonal **Calendar**
+overlays one line per tenor; all other views use the first-selected (primary) tenor.
+
+**Position (Long / Short)** — a toggle shown on every cumulative view (all seasonal sub-modes +
+the multi-tenor Chart). **Long** is the default; **Short** mirrors the metric so you can read the
+short leg directly. For the seasonal metrics it is an exact sign flip (×−1). For the multi-tenor
+Chart it switches each line from long-BE (`rBE − slip`) to true short-BE (`−rBE − slip`) — not an
+exact mirror, because the repo half-spread is a cost both ways (same convention as the single-tenor
+Chart's long/short lines). At `x_TIPS = x_UST = 0` the two coincide exactly. Titles append `— SHORT`.
 
 - **Aggregate** — box-and-whisker per (month, period): box = IQR, whiskers = 1.5×IQR, solid =
-  median, dashed = mean, faint points = each year (hover → year + value); + cumulative path + the
-  within-month signature (per-period boxes; grouped median bars when comparing windows).
+  median, **bright-yellow tick = mean**, outlier years shown as points (hover → year + value);
+  y-axis **rescaled to p1–p99** so the boxes fill the panel. + cumulative path + the within-month
+  signature (per-period boxes; grouped median bars when comparing windows).
 - **History** — each `(year, month, period)` bucket as a point over time (high-contrast lines,
   x = year), with period **checkboxes** + Month filter (e.g. P1 + all months = every P1 over time;
   P3 + Jan = each January's P3). Dashed line = median of the selection.
@@ -186,8 +195,9 @@ per tenor; all other views use the first-selected (primary) tenor.
   high BDOMs have lower `n` (months run 19–23 trading days). A **From start / From end** toggle
   flips the count: *from end* keys the last trading day as −1, −2, … so **month-ends align** across
   months — the clean way to read the turn-of-month effect (which otherwise smears at BDOM 20–23).
-  Single tenor+window → bars + cumulative path; multiple **tenors** → one line per tenor; multiple
-  **windows** → one line per window. Month filter to isolate one month.
+  Single tenor+window → **box plot per day** (box/median/mean tick, like Aggregate) + cumulative
+  path; multiple **tenors** → one line per tenor; multiple **windows** → one line per window. Month
+  filter to isolate one month.
 - **Predict** — OLS regressions across months: **P1→P2, P2→P3, P3→P4, P2+P3→P4, (P1+P2)→P3,
   (P1+P2)→(P3+P4)**, the **cross-month P4→next-month P1** (filters anchor on the P4 month), and
   **month→next month** (each month's *total* P&L vs the next; adjacency follows the **filtered**
@@ -195,6 +205,20 @@ per tenor; all other views use the first-selected (primary) tenor.
   slope / R² / corr / t-stat / n (|t|>2 flagged) + a scatter with the OLS line (pick the
   relationship at left). One observation per month; respects metric/β and all filters; multiple
   windows → a table block per window (degradation comparison). Linear OLS first; richer models later.
+- **Cumul** — cumulative P&L holding only the **selected slice** (period checkboxes, combinable —
+  e.g. P1+P2) each filtered month. The x-axis lists **only the kept months in sequence** (jumps
+  over excluded ones — e.g. Issue=New + P1 = each new-issue month's P1: 2011-01, 2011-02, 2011-04,
+  …; one tick per year), so it "rescales" to the relevant slices. Shows **metrics on the slice
+  returns**: n, total, mean/slice, vol/slice, **Sharpe** (annualized by slice frequency), and
+  **max drawdown**. The "what would this slice strategy have done" view; respects metric/β/window/issue/month.
+  (Note: new-issue months are Jan/Feb/Apr/Jul 2011–18 and add Oct from ~2019, when the Oct 5y
+  became a new issue — so the new-issue slice count steps 4→5/yr there; this is the real schedule.)
+- **Event** — every auction **aligned at day 0** (the auction date), ±N business days. Each line =
+  that auction's cumulative metric **rebased to 0 on the auction day** (so pre-auction is negative
+  time, post is forward); thick **gold = median**, dotted **white = mean** across all filtered
+  auctions. Pick a **Year** (its auctions drawn in colour vs the all-years median/mean) or "All"
+  (every auction faint) to spot which cycles out/under-perform; **Window** slider sets ±N. Uses the
+  shipped per-tenor daily series + auction dates; respects metric/β/issue/month.
 
 Shared filters (apply to all sub-modes):
 - **Metric** — TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
@@ -214,9 +238,10 @@ Shared filters (apply to all sub-modes):
   flag per year, so it tracks regime changes (the 5y Oct auction was a reopening pre-2019, a new
   issue after). All = New + Reopen = all 12 months. Composes with month/window/period — so
   "P2→P3 for new-issue months, last 5y" is just three toggles.
-- **Month** — All / **H1 (Jan–Jun)** / **H2 (Jul–Dec)** / a specific month (History, Calendar,
-  Predict). H1/H2 added as the easy seasonal-half conditioning; richer conditioning (rate/inflation
-  regime, pre/post structural breaks, CPI-release alignment) needs desk-defined cut points — TBD.
+- **Months** — **multi-select checkboxes** (any subset of Jan–Dec) with quick-set buttons
+  **All / H1 / H2 / None**; applies to History, Calendar, Predict, Cumul and Event. Pick e.g.
+  Jan+Apr+Jul to condition on just those. Richer conditioning (rate/inflation regime, pre/post
+  structural breaks, CPI-release alignment) still needs desk-defined cut points — TBD.
 
 - **QA** (`python engine.py seasonal`): auction day-of-month range (early-clamp guard), seam
   continuity `A0[M] == A4[M−1]`, and clamp counts. Knobs: `engine.SEASONAL_WEEK` (±1-week span),

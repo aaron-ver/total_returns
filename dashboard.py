@@ -12,25 +12,34 @@ overlay one line per tenor; all other views use the first-selected (primary) ten
 
 Three views (top-left toggle):
   * Chart  -- single tenor: cumulative long/short/mid breakeven net P&L (repo half-spread sliders).
-    Multiple tenors: one cumulative mid-BE line per tenor (slippage is a single-tenor refinement).
+    Multiple tenors: one cumulative LONG-BE line per tenor (repo half-spread applied; set both
+    sliders 0 for mid) + per-tenor totals across the top.
   * Table  -- the same, as daily or monthly rows with a window total (primary tenor).
   * Seasonal -- auction-cycle & calendar analysis (engine.seasonal_table). Every month is split
     into 4 periods around its single TIPS auction (A0..A4, ±1 week; shared monthly anchor across
-    all three tenors). Four sub-modes (toggle):
-      - Aggregate: a BOX PLOT per (month, period) -- box=IQR, whiskers=1.5*IQR, solid=median,
-        dashed=mean (boxmean), faint year points (hover=year+value) -- + cumulative Σ-median path +
-        a "within-month signature" (per-period boxes; grouped median bars when comparing windows).
+    all three tenors). Six sub-modes (toggle):
+      - Aggregate: a BOX PLOT per (month, period) -- box=IQR, whiskers=1.5*IQR, solid=median, bright
+        yellow tick=MEAN, only outlier year-points (hover=year+value), y-axis rescaled to p1..p99 so
+        boxes fill -- + cumulative Σ-median path + a "within-month signature" (per-period boxes).
       - History: each (year,month,period) bucket as a point over time (high-contrast lines, x=year);
         period CHECKBOXES + Month filter (e.g. P1 all months = every P1 over time).
-      - Calendar: the CALENDAR effect -- median daily P&L by business-day-of-month (holidays/d=0
-        excluded), independent of the auction cycle; From-start/From-end day count; Month filter.
+      - Calendar: the CALENDAR effect -- daily P&L by business-day-of-month (holidays/d=0 excluded),
+        shown as the SAME box plot (box/median/mean tick) when single tenor+window, lines when
+        overlaying; From-start/From-end day count; Month filter.
       - Predict: OLS regressions P1->P2, P2->P3, P3->P4, P2+P3->P4, (P1+P2)->P3, (P1+P2)->(P3+P4),
         the cross-month P4->next-P1, and month->next-month (totals, adjacency = the filtered set)
         (slope, R^2, corr, t-stat, n; |t|>2 flagged) + a scatter -- does early performance predict later?
+      - Cumul: cumulative P&L holding only the selected slice (period checkboxes, combinable e.g.
+        P1+P2) each filtered month -- x lists ONLY the kept months in sequence (jumps over excluded,
+        e.g. Issue=New+P1 = every new-issue month's P1) + metrics (n, total, mean, vol, Sharpe-ann,
+        max drawdown) on the slice returns.
+      - Event: every auction aligned at day 0, ±N business days; each line = that auction's
+        cumulative metric rebased to 0 on the auction day, + thick median & mean across all
+        filtered auctions -> spot per-cycle out/under-performers. Year selector + Window (±N).
     Shared controls: Metric TIPS / Nominal / Breakeven (β slider on Breakeven, = TIPS − β·UST,
     default β=100% = equal-DV01 plain breakeven); Sample window(s) Full / 5Y / 3Y (multi-select ->
     overlaid in signature/calendar/predict for degradation comparison); Issue type All / New / Reopen
-    (new-issue vs reopening months); Month All/H1/H2/specific. All aggregation is client-side off the
+    (new-issue vs reopening months); Months multi-select (any subset; quick All/H1/H2/None). Client-side off the
     shipped seas table, so every control is instant. Units = engine bp (= $/100k-DV01 P&L; ×$100k = $).
 
 Output: dashboard.html  (open in any browser; Plotly is embedded so it works offline).
@@ -60,6 +69,9 @@ def build_payload():
     Seasonal view aggregates this client-side — median across years, IQR band, n — as the
     tenor/metric/β change. Empty/clamped buckets ship as null and are excluded from the median."""
     st = engine.seasonal_table(save=True)
+    ac, inew = engine.tips_auction_calendar(), engine.tips_auction_isnew()   # monthly TIPS auction dates + new/reopen
+    aucts = [{"d": pd.Timestamp(v).strftime("%Y-%m-%d"), "n": bool(inew.get(k, True))}
+             for k, v in sorted(ac.items(), key=lambda kv: pd.Timestamp(kv[1]))]
     data = {}
     for t in TENORS:
         p = os.path.join(engine.CACHE, f"returns_{t}.parquet")
@@ -83,6 +95,7 @@ def build_payload():
                 "d": [int(v) for v in s["trading_days"]], "c": [bool(v) for v in s["clamped"]],
                 "n": [bool(v) for v in s["new_issue"]],   # new-issue (vs reopening) month
             },
+            "aucts": aucts,                                # monthly TIPS auction dates (for the event view)
         }
     if not data:
         raise SystemExit("No returns_*.parquet — run:  python engine.py")
@@ -149,9 +162,14 @@ __PLOTLY__
   .checks input{width:17px;height:17px;cursor:pointer;accent-color:var(--accent);flex:none}
   .checks .sw{width:12px;height:12px;border-radius:3px;flex:none}
   .checks .rng{color:var(--muted);font-size:11px}
-  #seasmode.sm4 button{font-size:11px;padding:7px 2px}
-  #seascal,#seasreg{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 10px 8px}
-  #seascalchart,#regchart{flex:1;min-height:0}
+  .mcheck{flex-direction:row;flex-wrap:wrap;gap:5px 4px}
+  .mcheck label{width:29%;font-size:12px;gap:4px}
+  #mquick.msel button{font-size:11px;padding:5px 2px}
+  #seasmode.sm4{flex-wrap:wrap}#seasmode.sm4 button{flex:1 1 30%;font-size:11px;padding:6px 2px}
+  #seascal,#seasreg,#seascum,#seasev{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 10px 8px}
+  #seascalchart,#regchart,#cumchart,#evchart{flex:1;min-height:0}
+  #cummetrics{display:flex;gap:20px;flex-wrap:wrap;padding:6px 2px;font-variant-numeric:tabular-nums}
+  #cummetrics .met{font-size:12px}#cummetrics .met b{font-size:16px;display:block}#cummetrics .met span{color:var(--muted);font-size:10px}
   #regtablewrap{padding:4px 0 8px}
   #regtablewrap table{width:auto;font-variant-numeric:tabular-nums;font-size:12px}
   #regtablewrap th,#regtablewrap td{padding:3px 14px;text-align:right;border-bottom:1px solid var(--line);position:static}
@@ -173,6 +191,8 @@ __PLOTLY__
     <div class="grp"><label>View</label><div class="seg" id="view">
       <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button>
       <button data-view="seasonal">Seasonal</button></div></div>
+    <div class="grp posv" style="display:none"><label>Position (cumulative) <span class="note" style="padding:0">short = mirror</span></label>
+      <div class="seg" id="pos"><button data-pos="long" class="on">Long</button><button data-pos="short">Short</button></div></div>
     <div class="grp rv"><label>Table frequency</label><div class="seg" id="freq">
       <button data-freq="monthly" class="on">Monthly</button><button data-freq="daily">Daily</button></div></div>
     <div class="grp sv" style="display:none"><label>Seasonal metric</label><div class="seg" id="smetric">
@@ -193,7 +213,8 @@ __PLOTLY__
       <button data-calend="start" class="on">From start</button><button data-calend="end">From end</button></div></div>
     <div class="grp sv" style="display:none"><label>Seasonal view</label><div class="seg sm4" id="seasmode">
       <button data-seasmode="agg" class="on">Aggregate</button><button data-seasmode="hist">History</button>
-      <button data-seasmode="cal">Calendar</button><button data-seasmode="reg">Predict</button></div></div>
+      <button data-seasmode="cal">Calendar</button><button data-seasmode="reg">Predict</button>
+      <button data-seasmode="cum">Cumul</button><button data-seasmode="event">Event</button></div></div>
     <div class="grp hv" style="display:none"><label>Periods (auction cycle)</label>
       <div class="checks" id="speriod">
         <label><input type="checkbox" value="1" checked><span class="sw" style="background:#4cc9f0"></span><b>P1</b><span class="rng">m/e → auction−1w</span></label>
@@ -201,11 +222,13 @@ __PLOTLY__
         <label><input type="checkbox" value="3" checked><span class="sw" style="background:#52b788"></span><b>P3</b><span class="rng">auction → auction+1w</span></label>
         <label><input type="checkbox" value="4" checked><span class="sw" style="background:#c77dff"></span><b>P4</b><span class="rng">auction+1w → m/e</span></label>
       </div></div>
-    <div class="grp mv" style="display:none"><label>Month</label>
-      <select id="smonth"><option value="all">All months</option><option value="h1">H1 (Jan–Jun)</option><option value="h2">H2 (Jul–Dec)</option><option value="1">Jan</option><option value="2">Feb</option>
-        <option value="3">Mar</option><option value="4">Apr</option><option value="5">May</option><option value="6">Jun</option>
-        <option value="7">Jul</option><option value="8">Aug</option><option value="9">Sep</option><option value="10">Oct</option>
-        <option value="11">Nov</option><option value="12">Dec</option></select></div>
+    <div class="grp mv" style="display:none"><label>Months (multi-select)</label>
+      <div class="seg msel" id="mquick" style="margin-bottom:6px"><button data-mq="all">All</button><button data-mq="h1">H1</button><button data-mq="h2">H2</button><button data-mq="none">None</button></div>
+      <div class="checks mcheck" id="smonths"></div></div>
+    <div class="grp ev" style="display:none"><label>Event year (lines)</label>
+      <select id="evyear"></select></div>
+    <div class="grp ev" style="display:none"><label>Window ± <span class="hl" id="evnv">15</span> business days</label>
+      <input type="range" id="evn" min="5" max="30" step="1" value="15"></div>
     <div class="grp pv" style="display:none"><label>Regression to plot</label>
       <select id="regpair"><option value="P1>P2">P1 → P2</option><option value="P2>P3">P2 → P3</option>
         <option value="P3>P4">P3 → P4</option><option value="P23>P4">P2+P3 → P4</option>
@@ -217,12 +240,7 @@ __PLOTLY__
       Specialness not modeled. Full hand-replication data: <code>python export.py</code>.</p>
   </div>
   <div class="main">
-    <div class="totals rv">
-      <div class="tot l"><span class="lab">long breakeven</span><b id="tl">+0</b> bp</div>
-      <div class="tot s"><span class="lab">short breakeven</span><b id="ts">+0</b> bp</div>
-      <div class="tot m"><span class="lab">mid (x=0)</span><b id="tm">+0</b> bp</div>
-      <div class="tot"><span class="lab">window</span><b id="twin" style="font-size:13px">&mdash;</b></div>
-    </div>
+    <div class="totals rv" id="totals"></div>
     <div id="chart"></div>
     <div class="tablewrap" id="tablewrap" style="display:none"><table id="tbl"></table><div class="note" id="tnote"></div></div>
     <div id="seaswrap" style="display:none">
@@ -244,12 +262,21 @@ __PLOTLY__
       <div id="regtablewrap"></div>
       <div id="regchart"></div>
     </div>
+    <div id="seascum" style="display:none">
+      <div class="note" id="cumcap"></div>
+      <div id="cummetrics"></div>
+      <div id="cumchart"></div>
+    </div>
+    <div id="seasev" style="display:none">
+      <div class="note" id="evcap"></div>
+      <div id="evchart"></div>
+    </div>
   </div>
 </div>
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swins:["full"], calend:"start", issue:"all", regpair:"P1>P2"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -290,10 +317,12 @@ function applyView(){
   const seasonal = S.view==="seasonal", mode = S.seasmode;
   document.querySelectorAll(".rv").forEach(e=>e.style.display=seasonal?"none":"");
   document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
-  document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&mode==="hist")?"":"none");      // periods (history)
-  document.querySelectorAll(".mv").forEach(e=>e.style.display=(seasonal&&mode!=="agg")?"":"none");        // month (hist/cal/reg)
+  document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&(mode==="hist"||mode==="cum"))?"":"none"); // periods (history/cumul)
+  document.querySelectorAll(".mv").forEach(e=>e.style.display=(seasonal&&mode!=="agg")?"":"none");        // month (hist/cal/reg/cum)
   document.querySelectorAll(".cv").forEach(e=>e.style.display=(seasonal&&mode==="cal")?"":"none");        // day-count (calendar)
   document.querySelectorAll(".pv").forEach(e=>e.style.display=(seasonal&&mode==="reg")?"":"none");        // regression picker
+  document.querySelectorAll(".ev").forEach(e=>e.style.display=(seasonal&&mode==="event")?"":"none");      // event year + window
+  document.querySelectorAll(".posv").forEach(e=>e.style.display=(seasonal||(S.view==="chart"&&S.tenors.length>1))?"":"none"); // long/short (cumulative views)
   $("betagrp").classList.toggle("off", seasonal && S.smetric!=="be");   // β only acts on Breakeven
   $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
   $("tablewrap").style.display=(!seasonal && S.view==="table")?"":"none";
@@ -301,15 +330,27 @@ function applyView(){
   $("seashist").style.display=(seasonal&&mode==="hist")?"":"none";
   $("seascal").style.display=(seasonal&&mode==="cal")?"":"none";
   $("seasreg").style.display=(seasonal&&mode==="reg")?"":"none";
+  $("seascum").style.display=(seasonal&&mode==="cum")?"":"none";
+  $("seasev").style.display=(seasonal&&mode==="event")?"":"none";
 }
-const SEASDRAW={agg:()=>drawSeasonal(),hist:()=>drawHistory(),cal:()=>drawCalendar(),reg:()=>drawPredict()};
+const SEASDRAW={agg:()=>drawSeasonal(),hist:()=>drawHistory(),cal:()=>drawCalendar(),reg:()=>drawPredict(),cum:()=>drawCumul(),event:()=>drawEvent()};
 function render(){
   applyView();
   if(S.view==="seasonal"){ (SEASDRAW[S.seasmode]||SEASDRAW.agg)(); return; }
   const s = series();
   const last = a => a.length?a[a.length-1]:0;
-  $("tl").textContent=fmt(last(s.cL),0); $("ts").textContent=fmt(last(s.cS),0); $("tm").textContent=fmt(last(s.cM),0);
-  $("twin").textContent = s.dates.length ? (s.dates[0]+"  →  "+s.dates[s.dates.length-1]+"  ("+s.dates.length+" days)") : "—";
+  const win = s.dates.length ? (s.dates[0]+" → "+s.dates[s.dates.length-1]) : "—";
+  if(S.view==="chart" && S.tenors.length>1){            // per-tenor long/short-BE totals (slippage applied)
+    let h=""; const isS=S.pos==="short", dir=isS?"short":"long";
+    for(const t of S.tenors){ const c=cumBEFor(t), arr=isS?c.short:c.long, v=arr.length?arr[arr.length-1]:0;
+      h+="<div class='tot'><span class='lab' style='color:"+TCOL[t]+"'>"+t+" "+dir+"-BE</span><b class='"+(v>=0?"pos":"neg")+"'>"+fmt(v,0)+"</b> bp</div>"; }
+    $("totals").innerHTML=h+"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+"</b></div>";
+  } else {
+    $("totals").innerHTML="<div class='tot l'><span class='lab'>long breakeven</span><b>"+fmt(last(s.cL),0)+"</b> bp</div>"
+      +"<div class='tot s'><span class='lab'>short breakeven</span><b>"+fmt(last(s.cS),0)+"</b> bp</div>"
+      +"<div class='tot m'><span class='lab'>mid (x=0)</span><b>"+fmt(last(s.cM),0)+"</b> bp</div>"
+      +"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+(s.dates.length?" ("+s.dates.length+"d)":"")+"</b></div>";
+  }
   if(S.view==="chart"){ S.tenors.length>1 ? drawChartMulti() : drawChart(s); } else { drawTable(s); }
 }
 let _raf=0;                                  // coalesce re-renders to one per animation frame: the
@@ -327,32 +368,40 @@ function drawChart(s){
   Plotly.react("chart",data,layout,{responsive:true,displaylogo:false});
 }
 const TCOL={"5y":"#4cc9f0","10y":"#f5a623","30y":"#e63946"};   // tenor colors for overlay
-function cumMidFor(tenor){                                      // cumulative MID breakeven (bp) over the window, one tenor
+function cumBEFor(tenor){                                       // cumulative LONG- and SHORT-BE (bp, repo half-spread applied) over the window
   const d=DATA[tenor], n=d.dates.length; let lo=0,hi=n-1;
   if(S.start){while(lo<n&&d.dates[lo]<S.start)lo++;}
   if(S.end){while(hi>=0&&d.dates[hi]>S.end)hi--;}
-  const xs=[],ys=[]; let c=0;
-  for(let i=lo;i<=hi;i++){ c+=d.rBE[i]; xs.push(d.dates[i]); ys.push(c); }
-  return {xs,ys};
+  const xs=[],lng=[],sht=[]; let cl=0,cs=0;                     // short = −rBE − slip (matches series(): not an exact mirror, the half-spread is a cost both ways)
+  for(let i=lo;i<=hi;i++){ const slip=S.xT*d.sT[i]+S.xU*d.sU[i]; cl+=d.rBE[i]-slip; cs+=-d.rBE[i]-slip; xs.push(d.dates[i]); lng.push(cl); sht.push(cs); }
+  return {xs,long:lng,short:sht};   // at x=0 sliders long equals the mid breakeven and short is its exact mirror
 }
-function drawChartMulti(){                                      // overlay tenors: one cumulative mid-BE line each
-  const data=S.tenors.map(t=>{ const c=cumMidFor(t);
-    return {x:c.xs,y:c.ys,name:t+" BE",mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
+function drawChartMulti(){                                      // overlay tenors: one long- or short-BE line each (slider-responsive)
+  const isS=S.pos==="short", dir=isS?"short":"long";
+  const data=S.tenors.map(t=>{ const c=cumBEFor(t);
+    return {x:c.xs,y:isS?c.short:c.long,name:t+" "+dir+"-BE",mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
   Plotly.react("chart",data,{paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
-    title:{text:S.tenors.join(" / ")+" breakeven cumulative (mid, bp) — repo half-spread applies in single-tenor view",font:{size:14}},
+    title:{text:S.tenors.join(" / ")+" "+dir+" breakeven cumulative (bp) — repo half-spread x_TIPS/x_UST applied (set both 0 for mid)",font:{size:14}},
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}},{responsive:true,displaylogo:false});
 }
 function median(a){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),n=b.length,h=n>>1; return n%2?b[h]:(b[h-1]+b[h])/2; }
+function mean(a){ return a.length? a.reduce((s,x)=>s+x,0)/a.length : null; }
 function quantile(a,q){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),pos=(b.length-1)*q,lo=Math.floor(pos); return b[lo]+((b[lo+1]??b[lo])-b[lo])*(pos-lo); }
+function poolRange(arrs,pad){ const pool=[]; for(const a of arrs) for(const v of a) pool.push(v); if(pool.length<3)return null;
+  pool.sort((x,y)=>x-y); const lo=quantile(pool,0.01),hi=quantile(pool,0.99),p=(hi-lo)*(pad||0.10)||1; return [lo-p,hi+p]; }   // robust y-range (p1..p99) so boxes fill, extreme outliers clip
+const MEANMARK={symbol:"line-ew",color:"#ffd633",size:9,line:{width:2,color:"#ffd633"}};   // high-contrast mean tick
 // --- shared seasonal filters: sample window(s) Full/5Y/3Y, issue type new/reopen, month/H1/H2 ---
 const WINS={"full":0,"5y":60,"3y":36}, WINCOL={"full":"#2f81f7","5y":"#f5a623","3y":"#e63946"}, WINLBL={"full":"Full","5y":"5Y","3y":"3Y"};
 function lastYM(){ const s=DATA[S.tenor].seas; let mx=0; for(let i=0;i<s.y.length;i++){const k=s.y[i]*12+s.m[i]; if(k>mx)mx=k;} return mx; }
 function winCutOf(w){ return w==="full" ? 0 : lastYM()-(WINS[w]-1); }      // min y*12+m for window w
 function winList(){ const l=["full","5y","3y"].filter(w=>S.swins.includes(w)); return l.length?l:["full"]; }
 function winMain(){ return winList()[0]; }                                 // longest selected (full>5y>3y): dense views
-function monthPass(m){ if(S.smonth==="all")return true; if(S.smonth==="h1")return m<=6; if(S.smonth==="h2")return m>=7; return m===+S.smonth; }
-function monthLbl(){ return S.smonth==="all"?"all months":S.smonth==="h1"?"H1 (Jan–Jun)":S.smonth==="h2"?"H2 (Jul–Dec)":MONTHS[+S.smonth-1]; }
+function sgn(){ return S.pos==="short"?-1:1; }                // short position = mirror the (mid) metric
+function dirS(){ return S.pos==="short"?" — SHORT":""; }
+function monthPass(m){ return S.smonths.includes(m); }
+function monthLbl(){ const a=S.smonths; if(a.length===12)return "all months"; if(!a.length)return "no months";
+  return a.length<=4 ? a.slice().sort((x,y)=>x-y).map(m=>MONTHS[m-1]).join(", ") : a.length+" months"; }
 function rowPass(s,i,withMonth,cut){                          // s = DATA[tenor].seas, i = row index, cut = winCutOf(w)
   if(S.issue==="new" && !s.n[i]) return false;
   if(S.issue==="reopen" && s.n[i]) return false;
@@ -368,8 +417,8 @@ function seasonalAgg(cut){
   // t-(β/100)·u. Stack across YEARS with the median per (month,period); IQR (q25..q75) + n.
   const sd=DATA[S.tenor].seas, beta=S.beta/100;
   const valOf=i=>{ const t=sd.t[i],u=sd.u[i];
-    if(S.smetric==="tips")return t; if(S.smetric==="nom")return u;
-    return (t==null||u==null)?null:t-beta*u; };
+    let v=S.smetric==="tips"?t:S.smetric==="nom"?u:((t==null||u==null)?null:t-beta*u);
+    return v==null?null:sgn()*v; };
   const byMP={}, byMPy={}, byP={1:[],2:[],3:[],4:[]}, byPy={1:[],2:[],3:[],4:[]}, clMP={};
   for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false,cut))continue;   // window + issue (not month: this IS the by-month view)
     const v=valOf(i); if(v==null)continue;
@@ -394,27 +443,32 @@ function drawSeasonal(){
   const boxTr=[0,1,2,3].map(p=>{ const xs=[],ys=[],txt=[];
     for(let m=0;m<12;m++){ const k=m*4+p, vals=a.rawMP[k]||[], yrs=a.rawMPy[k]||[];
       for(let j=0;j<vals.length;j++){ xs.push(m*4+p); ys.push(vals[j]); txt.push(yrs[j]); } }
-    return {type:"box",name:"P"+(p+1),x:xs,y:ys,text:txt,boxmean:true,boxpoints:"all",jitter:0.5,pointpos:0,
-      whiskerwidth:0.4,marker:{color:PCOL[p],size:3,opacity:.35},line:{color:PCOL[p],width:1},fillcolor:PCOL[p]+"22",
+    return {type:"box",name:"P"+(p+1),x:xs,y:ys,text:txt,boxmean:false,boxpoints:"outliers",
+      whiskerwidth:0.4,marker:{color:PCOL[p],size:3,opacity:.5},line:{color:PCOL[p],width:1},fillcolor:PCOL[p]+"22",
       hovertemplate:"%{text} · P"+(p+1)+": %{y:+.2f} bp<extra></extra>"};});
+  const mxx=[],myy=[];                                          // bright mean tick per box (high contrast)
+  for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const k=m*4+p, arr=a.rawMP[k]||[]; if(arr.length){mxx.push(m*4+p); myy.push(mean(arr));} }
+  const meanTr={type:"scatter",mode:"markers",name:"mean",x:mxx,y:myy,marker:MEANMARK,hovertemplate:"mean %{y:+.2f} bp<extra></extra>"};
   const cumTr={type:"scatter",mode:"lines",name:"cumulative (Σ medians)",yaxis:"y2",
     x:a.cum.map((_,i)=>i),y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.1f} bp<extra></extra>"};
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
-  Plotly.react("seastop",[...boxTr,cumTr],{
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const yr=poolRange(Object.values(a.rawMP));
+  Plotly.react("seastop",[...boxTr,meanTr,cumTr],{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},boxmode:"overlay",
-    title:{text:S.tenor+" — "+mname+" per auction-cycle period (box=IQR, ―median ┄mean, "+WINLBL[winMain()]+" window)",font:{size:13}},
+    title:{text:S.tenor+" — "+mname+" per auction-cycle period (box=IQR, ―median, ┃mean, "+WINLBL[winMain()]+" window)",font:{size:13}},
     xaxis:{tickvals:MONTHS.map((_,m)=>m*4+1.5),ticktext:MONTHS,gridcolor:"#2d3a48",range:[-0.6,47.6]},
-    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period P&L (bp)"},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period P&L (bp)",range:yr||undefined},
     yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
     hovermode:"closest",legend:{orientation:"h",y:1.14,font:{size:10}}},{responsive:true,displaylogo:false});
-  // within-month signature: single window -> box per period (mean+points); multiple -> grouped median bars per window
+  // within-month signature: single window -> box per period (mean tick + points); multiple -> grouped median bars per window
   let sigTr, sigLayout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},
     yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"P&L (bp)"},xaxis:{gridcolor:"#2d3a48"}};
   if(wl.length===1){
     sigTr=[1,2,3,4].map(p=>({type:"box",name:"P"+p,x:(a.rawP[p]||[]).map(()=>"P"+p),y:a.rawP[p]||[],text:a.rawPy[p]||[],
-      boxmean:true,boxpoints:"all",jitter:0.5,pointpos:0,marker:{color:PCOL[p-1],size:3,opacity:.4},line:{color:PCOL[p-1],width:1},fillcolor:PCOL[p-1]+"22",
+      boxmean:false,boxpoints:"all",jitter:0.6,pointpos:0,marker:{color:PCOL[p-1],size:4,opacity:.45},line:{color:PCOL[p-1],width:1},fillcolor:PCOL[p-1]+"22",
       hovertemplate:"%{text} · P"+p+": %{y:+.3f} bp<extra></extra>"}));
-    sigLayout.showlegend=false;
+    sigTr.push({type:"scatter",mode:"markers",name:"mean",x:[1,2,3,4].map(p=>"P"+p),y:[1,2,3,4].map(p=>mean(a.rawP[p]||[])),marker:MEANMARK,hovertemplate:"mean %{y:+.3f} bp<extra></extra>"});
+    sigLayout.showlegend=false; sigLayout.yaxis.range=poolRange([1,2,3,4].map(p=>a.rawP[p]||[]))||undefined;
   } else { sigTr=wl.map(w=>{ const s=seasonalAgg(winCutOf(w));
       return {type:"bar",name:WINLBL[w],x:["P1","P2","P3","P4"],y:s.sig,marker:{color:WINCOL[w]},
         error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.3)",thickness:1,width:3},
@@ -434,7 +488,7 @@ function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
   // period and/or one calendar month, returned per period sorted chronologically.
   const sd=DATA[S.tenor].seas, beta=S.beta/100, pday=[4,11,18,25], cut=winCutOf(winMain());   // day-of-month to place each period
-  const valOf=(t,u)=>S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u);
+  const valOf=(t,u)=>{ let v=S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); return v==null?null:sgn()*v; };
   const byP={1:[],2:[],3:[],4:[]};
   for(let i=0;i<sd.y.length;i++){
     const p=sd.p[i],m=sd.m[i],y=sd.y[i];
@@ -449,7 +503,7 @@ function seasonalHistory(){
 const MNAME2={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
 function drawHistory(){
   const byP=seasonalHistory(), periods=S.periods.slice().sort();
-  const single=S.smonth!=="all";                              // one month -> few pts/yr; markers help
+  const single=S.smonths.length<=2;                           // few months -> few pts/yr; markers help
   const traces=[]; let all=[];
   for(const p of periods){
     const arr=byP[p]; all=all.concat(arr.map(o=>o.v));
@@ -458,7 +512,7 @@ function drawHistory(){
       hovertemplate:"%{x|%Y-%m} · P"+p+": %{y:+.2f} bp<extra></extra>"});
   }
   const med=median(all);
-  const mname=MNAME2[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  const mname=MNAME2[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
   const perlbl=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join(",")||"none", monthlbl=monthLbl();
   Plotly.react("histchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:36,b:40},
@@ -482,7 +536,7 @@ function seasonalCalendar(cut, tenor){
   // from the LAST trading day (key −1 = last day, −2 = second-last) so month-ends align across months
   // (turn-of-month) instead of smearing at the high forward-BDOMs (months run 19–23 trading days).
   const d=DATA[tenor||S.tenor], beta=S.beta/100, nm=ymNewMap(tenor);
-  const valOf=i=>S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i];
+  const valOf=i=>sgn()*(S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i]);
   const hol=i=>d.dd[i]===0;                                     // bond-market holiday (stale d=0 row): not a trading day
   const T={}; for(let i=0;i<d.dates.length;i++){ if(hol(i))continue; const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // real trading days/month
   const byB={}; let curYM="", bd=0;
@@ -503,14 +557,14 @@ function seasonalCalendar(cut, tenor){
   const med=keys.map(b=>median(byB[b])), q1=keys.map(b=>quantile(byB[b],0.25)),
         q3=keys.map(b=>quantile(byB[b],0.75)), ns=keys.map(b=>byB[b].length);
   let c=0; const cum=med.map(v=>{c+=(v||0); return c;});
-  return {keys,med,q1,q3,ns,cum};
+  return {keys,med,q1,q3,ns,cum,raw:byB};
 }
 function drawCalendar(){
-  const wl=winList(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  const wl=winList(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
   const xtitle = S.calend==="end" ? "business day from month-end  (−1 = last trading day)"
                                   : "business day of month  (1 = first trading day)";
   let traces, layout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:42},
-    title:{text:S.tenor+" — "+mname+" by "+(S.calend==="end"?"day-from-month-end":"business day of month")+" (median)",font:{size:13}},
+    title:{text:S.tenor+" — "+mname+" by "+(S.calend==="end"?"day-from-month-end":"business day of month")+(S.tenors.length>1||wl.length>1?" (median lines)":" (box=IQR, ┃mean)"),font:{size:13}},
     xaxis:{title:xtitle,gridcolor:"#2d3a48",dtick:1},
     yaxis:{title:"median daily P&L (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}}};
@@ -518,12 +572,15 @@ function drawCalendar(){
     traces=S.tenors.map(t=>{ const a=seasonalCalendar(winCutOf(winMain()), t);
       return {type:"scatter",mode:"lines+markers",name:t,x:a.keys,y:a.med,line:{color:TCOL[t],width:1.7},marker:{size:4,color:TCOL[t]},
         customdata:a.ns,hovertemplate:"day %{x} ["+t+"]: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};});
-  } else if(wl.length===1){                                     // single tenor + window: bars + cumulative path
-    const a=seasonalCalendar(winCutOf(wl[0]));
-    traces=[{type:"bar",name:"median",x:a.keys,y:a.med,marker:{color:"#2f81f7"},
-      error_y:{type:"data",symmetric:false,array:a.med.map((v,i)=>v==null?0:a.q3[i]-v),arrayminus:a.med.map((v,i)=>v==null?0:v-a.q1[i]),color:"rgba(230,237,243,.22)",thickness:1,width:0},
-      customdata:a.ns,hovertemplate:"day %{x}: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"},
+  } else if(wl.length===1){                                     // single tenor + window: box per day + mean + cumulative
+    const a=seasonalCalendar(winCutOf(wl[0])); const xs=[],ys=[];
+    for(const k of a.keys) for(const v of a.raw[k]){ xs.push(k); ys.push(v); }
+    traces=[{type:"box",name:"daily",x:xs,y:ys,boxmean:false,boxpoints:"outliers",whiskerwidth:0.4,
+        marker:{color:"#2f81f7",size:3,opacity:.4},line:{color:"#2f81f7",width:1},fillcolor:"#2f81f733",
+        hovertemplate:"day %{x}: %{y:+.3f} bp<extra></extra>"},
+      {type:"scatter",mode:"markers",name:"mean",x:a.keys,y:a.keys.map(k=>mean(a.raw[k])),marker:MEANMARK,hovertemplate:"mean %{y:+.3f} bp<extra></extra>"},
       {type:"scatter",mode:"lines",name:"cumulative",yaxis:"y2",x:a.keys,y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.2f} bp<extra></extra>"}];
+    layout.boxmode="overlay"; layout.yaxis.range=poolRange(Object.values(a.raw))||undefined;
     layout.yaxis2={overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false};
   } else {                                                      // single tenor, multiple windows: one median line each
     traces=wl.map(w=>{ const a=seasonalCalendar(winCutOf(w));
@@ -534,13 +591,13 @@ function drawCalendar(){
   $("calcap").innerHTML="The <b>calendar effect</b>: median daily P&L by <b>"+(S.calend==="end"?"day from month-end":"business day of month")
     +"</b>, independent of the auction cycle — <b>"+filtDesc()+"</b>, "+monthLbl()
     +(S.tenors.length>1?". One line per <b>tenor</b> ("+WINLBL[winMain()]+" window)."
-        :wl.length===1?". Bars = median (whiskers 25–75th); gold = cumulative within-month path."
+        :wl.length===1?". Box = IQR, ┃ = <b>mean</b>, ― = median; gold = cumulative within-month path."
                    :". One line per sample window (compare degradation).")
     +" Note x = trading days (≈19–23/month), not calendar dates; use From-end to align the turn-of-month.";
 }
 // ============ Predict: OLS regressions between within-month periods ============
 function rowVal(s,i){ const beta=S.beta/100,t=s.t[i],u=s.u[i];
-  return S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); }
+  let v=S.smetric==="tips"?t:S.smetric==="nom"?u:(t==null||u==null?null:t-beta*u); return v==null?null:sgn()*v; }
 function monthBuckets(cut, withFilters){                        // {ym:{1,2,3,4}}; withFilters=issue+month, else window-only
   const s=DATA[S.tenor].seas, out={};
   for(let i=0;i<s.y.length;i++){
@@ -603,18 +660,99 @@ function drawPredict(){
     marker:{color:"#2f81f7",size:6,opacity:.7},hovertemplate:"predictor %{x:+.2f} → target %{y:+.2f} bp<extra></extra>"}];
   if(f){ const xmn=Math.min(...sel.xs),xmx=Math.max(...sel.xs);
     traces.push({type:"scatter",mode:"lines",name:"OLS fit",x:[xmn,xmx],y:[f.a+f.b*xmn,f.a+f.b*xmx],line:{color:"#f5a623",width:2}}); }
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
   Plotly.react("regchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:34,b:42},
-    title:{text:sel.lab+"   ("+mname+", "+WINLBL[winMain()]+" window"+(S.smonth==="all"?"":", "+monthLbl())+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
+    title:{text:sel.lab+"   ("+mname+", "+WINLBL[winMain()]+" window"+(S.smonths.length===12?"":", "+monthLbl())+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
     xaxis:{title:"predictor (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     yaxis:{title:"target (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     hovermode:"closest",showlegend:false},{responsive:true,displaylogo:false});
   $("regcap").innerHTML="Does early-month performance predict later? Each point = one month ("+filtDesc()
-    +(S.smonth==="all"?"":", "+monthLbl())+"); OLS of target on predictor, bucket P&L in bp. "
+    +(S.smonths.length===12?"":", "+monthLbl())+"); OLS of target on predictor, bucket P&L in bp. "
     +"<b>P4 → next-month P1</b> is cross-month (this month's P4 vs the <i>following</i> month's P1; filters apply to the P4 month). "
     +"|t|&gt;2 (~5% significance) highlighted green. Pick which relationship to plot at left; with multiple windows "
     +"the table compares them (scatter shows the "+WINLBL[winMain()]+" window). Month / Issue / Sample condition the regression.";
+}
+// ============ Cumul: filtered-slice cumulative P&L + performance metrics ============
+function drawCumul(){
+  const cut=winCutOf(winMain()), mb=monthBuckets(cut,true), periods=S.periods.slice().sort();
+  const yms=Object.keys(mb).map(Number).sort((a,b)=>a-b);
+  const plabel=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join("+")||"none";
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const labels=[], slices=[], cum=[]; let c=0;                  // one slice per filtered month = Σ selected periods
+  for(const ym of yms){ const b=mb[ym]; let v=0,has=false;
+    for(const p of periods){ if(b[p]!=null){ v+=b[p]; has=true; } }
+    if(!has) continue;
+    const y=Math.floor((ym-1)/12), m=ym-y*12;
+    labels.push(y+"-"+String(m).padStart(2,"0")); slices.push(v); c+=v; cum.push(c); }
+  const tickvals=[],ticktext=[]; let py="";                    // one tick per year (first kept slice of each year)
+  for(const lab of labels){ const yr=lab.slice(0,4); if(yr!==py){tickvals.push(lab); ticktext.push(yr); py=yr;} }
+  const n=slices.length, total=c, mu=mean(slices)||0;
+  let varr=0; for(const v of slices) varr+=(v-mu)*(v-mu); const vol=n>1?Math.sqrt(varr/(n-1)):0;
+  const spanY=n>1?(yms[yms.length-1]-yms[0])/12:1, spy=spanY>0?n/spanY:12;   // slices per year (for annualizing)
+  const sharpe=vol>0?mu/vol*Math.sqrt(spy):0;
+  let peak=-1e18,mdd=0; for(const v of cum){ if(v>peak)peak=v; if(peak-v>mdd)mdd=peak-v; }
+  const f1=x=>(x>=0?"+":"")+x.toFixed(1);
+  const met=n?[{l:"slices",v:String(n),c:""},{l:"total",v:f1(total)+" bp",c:total>=0?"pos":"neg"},
+    {l:"mean / slice",v:(mu>=0?"+":"")+mu.toFixed(2)+" bp",c:mu>=0?"pos":"neg"},{l:"vol / slice",v:vol.toFixed(2)+" bp",c:""},
+    {l:"Sharpe (ann)",v:sharpe.toFixed(2),c:sharpe>=0?"pos":"neg",s:"×√"+Math.round(spy)+"/yr"},
+    {l:"max drawdown",v:"−"+mdd.toFixed(1)+" bp",c:"neg"}]:[];
+  $("cummetrics").innerHTML=met.map(m=>"<div class='met'><b class='"+m.c+"'>"+m.v+"</b>"+m.l+(m.s?" <span>"+m.s+"</span>":"")+"</div>").join("");
+  Plotly.react("cumchart",[{type:"scatter",mode:"lines",x:labels,y:cum,line:{color:"#3fb950",width:2},
+      hovertemplate:"%{x}: cum %{y:+.1f} bp<extra></extra>"}],{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:34,b:62},
+    title:{text:S.tenor+" — cumulative "+mname+", "+plabel+" slices ("+filtDesc()+", "+monthLbl()+")",font:{size:13}},
+    xaxis:{type:"category",gridcolor:"#2d3a48",tickvals:tickvals,ticktext:ticktext,tickangle:0},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"cumulative P&L (bp)"},
+    hovermode:"closest",showlegend:false},{responsive:true,displaylogo:false});
+  $("cumcap").innerHTML=(periods.length?"":"<b>Select ≥1 period at left.</b> ")
+    +"Cumulative P&L holding only the <b>"+plabel+"</b> slice each month ("+filtDesc()+", "+monthLbl()
+    +"). The x-axis lists <b>only the kept months</b> in sequence (so it jumps over excluded ones — e.g. Issue=New + P1 = "
+    +"each new-issue month's P1: 2011-01, 2011-02, 2011-04, …). Metrics are on the per-slice returns; Sharpe is annualized by the slice frequency.";
+}
+// ============ Event: returns aligned at the auction (day 0), ±N business days ============
+function drawEvent(){
+  const d=DATA[S.tenor], beta=S.beta/100, N=S.evn;
+  const idx={}; for(let i=0;i<d.dates.length;i++) idx[d.dates[i]]=i;
+  const val=i=>sgn()*(S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i]);
+  const offs=[]; for(let k=-N;k<=N;k++) offs.push(k);
+  const ref=offs.map(()=>[]);                                  // per-offset values across ALL filtered auctions (median/mean)
+  const curves=[]; let nAuc=0;
+  for(const a of d.aucts){
+    const y=+a.d.slice(0,4), m=+a.d.slice(5,7);
+    if(S.issue==="new"&&!a.n) continue; if(S.issue==="reopen"&&a.n) continue; if(!monthPass(m)) continue;
+    const ai=idx[a.d]; if(ai==null) continue;
+    const raw=offs.map(k=>{ const i=ai+k; return (i>=1&&i<d.dates.length)?val(i):null; });
+    let cc=0; const cum=raw.map(v=>v==null?null:(cc+=v,cc));    // cumulate over the window
+    const base=cum[N]; if(base==null) continue;                // rebase to 0 on the auction day (offset 0)
+    const reb=cum.map(v=>v==null?null:v-base);
+    curves.push({y,m,reb}); reb.forEach((v,j)=>{ if(v!=null) ref[j].push(v); }); nAuc++;
+  }
+  const traces=[];
+  for(const cv of curves){                                     // individual auction lines
+    const sel = S.evyear==="all" || cv.y===+S.evyear;
+    if(S.evyear!=="all" && !sel) continue;                     // a specific year -> only that year's lines
+    const faint = S.evyear==="all";
+    traces.push({type:"scatter",mode:"lines",x:offs,y:cv.reb,name:cv.y+"-"+String(cv.m).padStart(2,"0"),showlegend:!faint,
+      line:{width:faint?0.6:1.7,color:faint?"#8b98a5":undefined},opacity:faint?0.16:0.95,
+      hovertemplate:cv.y+"-"+String(cv.m).padStart(2,"0")+"  day %{x}: %{y:+.2f} bp<extra></extra>"});
+  }
+  traces.push({type:"scatter",mode:"lines",name:"median (all yrs)",x:offs,y:ref.map(a=>median(a)),line:{color:"#ffd633",width:3.5},hovertemplate:"median day %{x}: %{y:+.2f} bp<extra></extra>"});
+  traces.push({type:"scatter",mode:"lines",name:"mean (all yrs)",x:offs,y:ref.map(a=>mean(a)),line:{color:"#e6edf3",width:2.5,dash:"dot"},hovertemplate:"mean day %{x}: %{y:+.2f} bp<extra></extra>"});
+  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  Plotly.react("evchart",traces,{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:56,r:20,t:34,b:42},
+    title:{text:S.tenor+" — "+mname+" around the auction (event-aligned; day 0 = auction)",font:{size:13}},
+    xaxis:{title:"business days from auction (0 = auction day)",gridcolor:"#2d3a48",zeroline:false,dtick:5},
+    yaxis:{title:"cumulative P&L, rebased to 0 at auction (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
+    hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}},
+    shapes:[{type:"line",x0:0,x1:0,yref:"paper",y0:0,y1:1,line:{color:"#8b98a5",width:1,dash:"dot"}}]},{responsive:true,displaylogo:false});
+  $("evcap").innerHTML="Every auction aligned at <b>day 0</b>; each line = that auction's cumulative "+mname
+    +" rebased to 0 on the auction day, ±"+N+" business days. "
+    +(S.evyear==="all"?"Faint grey = every auction":"Coloured = <b>"+S.evyear+"</b> auctions")
+    +"; <b>thick gold = median</b>, dotted white = mean across all "+nAuc+" "
+    +(S.issue==="all"?"":(S.issue==="new"?"new-issue ":"reopening "))+"auctions ("+monthLbl()+"). "
+    +"Lines above/below the median are out/under-performers that cycle. Widen ± with the Window slider; pick a year at left.";
 }
 function drawTable(s){
   const cols=["period","TIPS","UST","BEmid","longBE","shortBE"];
@@ -653,7 +791,7 @@ tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.
   S.tenor=S.tenors[0];                                                                     // primary = first selected
   tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",S.tenors.includes(x.dataset.tenor))); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
-seg("issue","issue"); seg("calend","calend");
+seg("issue","issue"); seg("calend","calend"); seg("pos","pos");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
   S.periods=[...$("speriod").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
 $("swin").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
@@ -661,8 +799,18 @@ $("swin").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
 $("xt").oninput=e=>{S.xT=+e.target.value; $("xtv").textContent=S.xT.toFixed(1); scheduleRender();};
 $("xu").oninput=e=>{S.xU=+e.target.value; $("xuv").textContent=S.xU.toFixed(1); scheduleRender();};
 $("beta").oninput=e=>{S.beta=+e.target.value; $("betav").textContent=S.beta; scheduleRender();};
-$("smonth").onchange=e=>{S.smonth=e.target.value; render();};
+$("smonths").innerHTML=MONTHS.map((mm,i)=>"<label><input type='checkbox' value='"+(i+1)+"' checked> "+mm+"</label>").join("");
+$("smonths").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
+  S.smonths=[...$("smonths").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
+$("mquick").querySelectorAll("button").forEach(b=>b.onclick=()=>{ const q=b.dataset.mq;
+  S.smonths=q==="all"?[1,2,3,4,5,6,7,8,9,10,11,12]:q==="h1"?[1,2,3,4,5,6]:q==="h2"?[7,8,9,10,11,12]:[];
+  $("smonths").querySelectorAll("input").forEach(cb=>cb.checked=S.smonths.includes(+cb.value)); render(); });
 $("regpair").onchange=e=>{S.regpair=e.target.value; render();};
+$("evn").oninput=e=>{S.evn=+e.target.value; $("evnv").textContent=S.evn; scheduleRender();};
+$("evyear").onchange=e=>{S.evyear=e.target.value; render();};
+(function(){ const ys=[...new Set((DATA[S.tenor].aucts||[]).map(a=>a.d.slice(0,4)))].sort();   // populate event-year dropdown
+  $("evyear").innerHTML="<option value='all'>All years</option>"+ys.map(y=>"<option value='"+y+"'>"+y+"</option>").join("");
+  S.evyear=ys.length?ys[ys.length-1]:"all"; $("evyear").value=S.evyear; })();
 function setRangeBtn(name){ document.querySelectorAll("#range button").forEach(x=>x.classList.toggle("on", x.dataset.range===name)); }
 $("start").onchange=e=>{S.start=e.target.value||null; setRangeBtn(null); render();};
 $("end").onchange=e=>{S.end=e.target.value||null; setRangeBtn(null); render();};
