@@ -7,24 +7,31 @@ op -> instant, no server, no lag. Plotly.js for charts (zoom/pan/hover), native 
 pickers + range sliders, a clean CSS layout, a sortable raw-numbers table (daily or monthly),
 live net P&L, and a one-click CSV download of the current window.
 
+Tenor is MULTI-SELECT (toggle, >=1 on): with several selected the Chart and the seasonal Calendar
+overlay one line per tenor; all other views use the first-selected (primary) tenor. Windows are shared.
+
 Three views (top-left toggle):
-  * Chart  -- cumulative long/short/mid breakeven net P&L (the repo half-spread sliders).
-  * Table  -- the same, as daily or monthly rows with a window total.
+  * Chart  -- single tenor: cumulative long/short/mid breakeven net P&L (repo half-spread sliders).
+    Multiple tenors: one cumulative mid-BE line per tenor (slippage is a single-tenor refinement).
+  * Table  -- the same, as daily or monthly rows with a window total (primary tenor).
   * Seasonal -- auction-cycle & calendar analysis (engine.seasonal_table). Every month is split
     into 4 periods around its single TIPS auction (A0..A4, ±1 week; shared monthly anchor across
     all three tenors). Four sub-modes (toggle):
-      - Aggregate: 4 bars/calendar-month (median across years, 25-75 IQR, n) + cumulative seasonal
-        path + a "within-month signature" (each period pooled across months -> the pure cycle).
+      - Aggregate: a BOX PLOT per (month, period) -- box=IQR, whiskers=1.5*IQR, solid=median,
+        dashed=mean (boxmean), faint year points (hover=year+value) -- + cumulative Σ-median path +
+        a "within-month signature" (per-period boxes; grouped median bars when comparing windows).
       - History: each (year,month,period) bucket as a point over time (high-contrast lines, x=year);
         period CHECKBOXES + Month filter (e.g. P1 all months = every P1 over time).
-      - Calendar: the CALENDAR effect -- median daily P&L by business-day-of-month (turn-of-month
-        etc.), independent of the auction cycle; Month filter to isolate one month.
-      - Predict: OLS regressions P1->P2, P2->P3, P3->P4, (P1+P2)->P3, (P1+P2)->(P3+P4) across months
-        (slope, R^2, corr, t-stat, n; |t|>2 flagged) + a scatter -- does early-month predict later?
+      - Calendar: the CALENDAR effect -- median daily P&L by business-day-of-month (holidays/d=0
+        excluded), independent of the auction cycle; From-start/From-end day count; Month filter.
+      - Predict: OLS regressions P1->P2, P2->P3, P3->P4, P2+P3->P4, (P1+P2)->P3, (P1+P2)->(P3+P4),
+        the cross-month P4->next-P1, and month->next-month (totals, adjacency = the filtered set)
+        (slope, R^2, corr, t-stat, n; |t|>2 flagged) + a scatter -- does early performance predict later?
     Shared controls: Metric TIPS / Nominal / Breakeven (β slider on Breakeven, = TIPS − β·UST,
-    β=100% plain, default 75%); Sample window Full / 5Y / 3Y; Issue type All / New / Reopen
-    (new-issue vs reopening months). All aggregation is client-side off the shipped seas table, so
-    every control is instant. Units = engine bp (= $/100k-DV01 P&L; ×$100k = dollars).
+    default β=100% = equal-DV01 plain breakeven); Sample window(s) Full / 5Y / 3Y (multi-select ->
+    overlaid in signature/calendar/predict for degradation comparison); Issue type All / New / Reopen
+    (new-issue vs reopening months); Month All/H1/H2/specific. All aggregation is client-side off the
+    shipped seas table, so every control is instant. Units = engine bp (= $/100k-DV01 P&L; ×$100k = $).
 
 Output: dashboard.html  (open in any browser; Plotly is embedded so it works offline).
 
@@ -153,7 +160,7 @@ __PLOTLY__
 <body><div class="app">
   <div class="side">
     <h1>Breakeven financed TR</h1>
-    <div class="grp"><label>Tenor</label><div class="seg" id="tenor"></div></div>
+    <div class="grp"><label>Tenor <span class="note" style="padding:0">(multi = overlay in Chart/Calendar)</span></label><div class="seg" id="tenor"></div></div>
     <div class="grp rv"><label>Repo half-spread x_TIPS <span class="hl" id="xtv">3.0</span> bp</label>
       <input type="range" id="xt" min="0" max="25" step="0.5" value="3"></div>
     <div class="grp rv"><label>Repo half-spread x_UST <span class="hl" id="xuv">3.0</span> bp</label>
@@ -171,9 +178,9 @@ __PLOTLY__
     <div class="grp sv" style="display:none"><label>Seasonal metric</label><div class="seg" id="smetric">
       <button data-smetric="tips" class="on">TIPS</button><button data-smetric="nom">Nominal</button>
       <button data-smetric="be">Breakeven</button></div></div>
-    <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">75</span>%
-      &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 plain)</span></label>
-      <input type="range" id="beta" min="0" max="150" step="5" value="75"></div>
+    <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">100</span>%
+      &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 = equal DV01)</span></label>
+      <input type="range" id="beta" min="0" max="150" step="5" value="100"></div>
     <div class="grp sv" style="display:none"><label>Sample window(s)</label>
       <div class="checks" id="swin">
         <label><input type="checkbox" value="full" checked><span class="sw" style="background:#2f81f7"></span><b>Full</b><span class="rng">2011 → now</span></label>
@@ -203,7 +210,7 @@ __PLOTLY__
       <select id="regpair"><option value="P1>P2">P1 → P2</option><option value="P2>P3">P2 → P3</option>
         <option value="P3>P4">P3 → P4</option><option value="P23>P4">P2+P3 → P4</option>
         <option value="P12>P3">P1+P2 → P3</option><option value="P12>P34">P1+P2 → P3+P4</option>
-        <option value="P4>P1n">P4 → next-month P1</option></select></div>
+        <option value="P4>P1n">P4 → next-month P1</option><option value="M>Mn">month → next month</option></select></div>
     <button class="act rv" id="dl">Download CSV (window)</button>
     <p class="note">Long-BE = long TIPS / short UST. Both directions carry the slippage
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
@@ -242,7 +249,7 @@ __PLOTLY__
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:75, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swins:["full"], calend:"start", issue:"all", regpair:"P1>P2"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, seasmode:"agg", periods:[1,2,3,4], smonth:"all", swins:["full"], calend:"start", issue:"all", regpair:"P1>P2"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -303,7 +310,7 @@ function render(){
   const last = a => a.length?a[a.length-1]:0;
   $("tl").textContent=fmt(last(s.cL),0); $("ts").textContent=fmt(last(s.cS),0); $("tm").textContent=fmt(last(s.cM),0);
   $("twin").textContent = s.dates.length ? (s.dates[0]+"  →  "+s.dates[s.dates.length-1]+"  ("+s.dates.length+" days)") : "—";
-  if(S.view==="chart"){ drawChart(s); } else { drawTable(s); }
+  if(S.view==="chart"){ S.tenors.length>1 ? drawChartMulti() : drawChart(s); } else { drawTable(s); }
 }
 let _raf=0;                                  // coalesce re-renders to one per animation frame: the
 function scheduleRender(){                    // slider handler then returns instantly (so the thumb
@@ -318,6 +325,23 @@ function drawChart(s){
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}};
   Plotly.react("chart",data,layout,{responsive:true,displaylogo:false});
+}
+const TCOL={"5y":"#4cc9f0","10y":"#f5a623","30y":"#e63946"};   // tenor colors for overlay
+function cumMidFor(tenor){                                      // cumulative MID breakeven (bp) over the window, one tenor
+  const d=DATA[tenor], n=d.dates.length; let lo=0,hi=n-1;
+  if(S.start){while(lo<n&&d.dates[lo]<S.start)lo++;}
+  if(S.end){while(hi>=0&&d.dates[hi]>S.end)hi--;}
+  const xs=[],ys=[]; let c=0;
+  for(let i=lo;i<=hi;i++){ c+=d.rBE[i]; xs.push(d.dates[i]); ys.push(c); }
+  return {xs,ys};
+}
+function drawChartMulti(){                                      // overlay tenors: one cumulative mid-BE line each
+  const data=S.tenors.map(t=>{ const c=cumMidFor(t);
+    return {x:c.xs,y:c.ys,name:t+" BE",mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
+  Plotly.react("chart",data,{paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
+    title:{text:S.tenors.join(" / ")+" breakeven cumulative (mid, bp) — repo half-spread applies in single-tenor view",font:{size:14}},
+    xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
+    hovermode:"x unified",legend:{orientation:"h",y:1.08}},{responsive:true,displaylogo:false});
 }
 function median(a){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),n=b.length,h=n>>1; return n%2?b[h]:(b[h-1]+b[h])/2; }
 function quantile(a,q){ if(!a.length)return null; const b=a.slice().sort((x,y)=>x-y),pos=(b.length-1)*q,lo=Math.floor(pos); return b[lo]+((b[lo+1]??b[lo])-b[lo])*(pos-lo); }
@@ -346,11 +370,12 @@ function seasonalAgg(cut){
   const valOf=i=>{ const t=sd.t[i],u=sd.u[i];
     if(S.smetric==="tips")return t; if(S.smetric==="nom")return u;
     return (t==null||u==null)?null:t-beta*u; };
-  const byMP={}, byP={1:[],2:[],3:[],4:[]}, clMP={};
+  const byMP={}, byMPy={}, byP={1:[],2:[],3:[],4:[]}, byPy={1:[],2:[],3:[],4:[]}, clMP={};
   for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false,cut))continue;   // window + issue (not month: this IS the by-month view)
     const v=valOf(i); if(v==null)continue;
     const m=sd.m[i],p=sd.p[i],k=(m-1)*4+(p-1);
-    (byMP[k]=byMP[k]||[]).push(v); byP[p].push(v); if(sd.c[i])clMP[k]=(clMP[k]||0)+1; }
+    (byMP[k]=byMP[k]||[]).push(v); (byMPy[k]=byMPy[k]||[]).push(sd.y[i]);   // raw values + years (for box plots / hover)
+    byP[p].push(v); byPy[p].push(sd.y[i]); if(sd.c[i])clMP[k]=(clMP[k]||0)+1; }
   const med=[[],[],[],[]],q1=[[],[],[],[]],q3=[[],[],[],[]],ns=[[],[],[],[]],clamp=[[],[],[],[]];
   for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const k=m*4+p, arr=byMP[k]||[];
     med[p][m]=median(arr); q1[p][m]=quantile(arr,0.25); q3[p][m]=quantile(arr,0.75);
@@ -359,47 +384,51 @@ function seasonalAgg(cut){
   for(let m=0;m<12;m++)for(let p=0;p<4;p++){ const v=med[p][m]; if(v!=null)c+=v; cum.push(c); }
   const sig=[1,2,3,4].map(p=>median(byP[p])), sq1=[1,2,3,4].map(p=>quantile(byP[p],0.25)),
         sq3=[1,2,3,4].map(p=>quantile(byP[p],0.75)), sn=[1,2,3,4].map(p=>byP[p].length);
-  return {med,q1,q3,ns,clamp,cum,sig,sq1,sq3,sn};
+  return {med,q1,q3,ns,clamp,cum,sig,sq1,sq3,sn,rawMP:byMP,rawMPy:byMPy,rawP:byP,rawPy:byPy};
 }
 const MNAME={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
 function drawSeasonal(){
-  const wl=winList(), a=seasonalAgg(winCutOf(winMain()));     // 48-bar uses the longest selected window
-  const barTr=[0,1,2,3].map(p=>({type:"bar",name:PLAB[p],x:MONTHS.map((_,m)=>m*4+p),y:a.med[p],
-    marker:{color:PCOL[p]},width:0.92,
-    error_y:{type:"data",symmetric:false,array:a.med[p].map((v,m)=>v==null?0:a.q3[p][m]-v),
-             arrayminus:a.med[p].map((v,m)=>v==null?0:v-a.q1[p][m]),color:"rgba(230,237,243,.28)",thickness:1,width:0},
-    customdata:MONTHS.map((mm,m)=>[mm,a.ns[p][m],a.q1[p][m],a.q3[p][m]]),
-    hovertemplate:"%{customdata[0]} · P"+(p+1)+"<br>median %{y:+.2f} bp  (IQR %{customdata[2]:+.2f}..%{customdata[3]:+.2f}, n=%{customdata[1]})<extra></extra>"}));
+  const wl=winList(), a=seasonalAgg(winCutOf(winMain()));     // 48-box uses the longest selected window
+  // box-and-whisker per (month, period): box=IQR, whiskers=1.5*IQR, solid=median, dashed=mean
+  // (boxmean), all year points jittered with hover (year + value). One box trace per period.
+  const boxTr=[0,1,2,3].map(p=>{ const xs=[],ys=[],txt=[];
+    for(let m=0;m<12;m++){ const k=m*4+p, vals=a.rawMP[k]||[], yrs=a.rawMPy[k]||[];
+      for(let j=0;j<vals.length;j++){ xs.push(m*4+p); ys.push(vals[j]); txt.push(yrs[j]); } }
+    return {type:"box",name:"P"+(p+1),x:xs,y:ys,text:txt,boxmean:true,boxpoints:"all",jitter:0.5,pointpos:0,
+      whiskerwidth:0.4,marker:{color:PCOL[p],size:3,opacity:.35},line:{color:PCOL[p],width:1},fillcolor:PCOL[p]+"22",
+      hovertemplate:"%{text} · P"+(p+1)+": %{y:+.2f} bp<extra></extra>"};});
   const cumTr={type:"scatter",mode:"lines",name:"cumulative (Σ medians)",yaxis:"y2",
     x:a.cum.map((_,i)=>i),y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.1f} bp<extra></extra>"};
   const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"");
-  Plotly.react("seastop",[...barTr,cumTr],{
-    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},
-    barmode:"overlay",title:{text:S.tenor+" — "+mname+" per auction-cycle period (median bp, "+WINLBL[winMain()]+" window)",font:{size:13}},
+  Plotly.react("seastop",[...boxTr,cumTr],{
+    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},boxmode:"overlay",
+    title:{text:S.tenor+" — "+mname+" per auction-cycle period (box=IQR, ―median ┄mean, "+WINLBL[winMain()]+" window)",font:{size:13}},
     xaxis:{tickvals:MONTHS.map((_,m)=>m*4+1.5),ticktext:MONTHS,gridcolor:"#2d3a48",range:[-0.6,47.6]},
-    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period median (bp)"},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"period P&L (bp)"},
     yaxis2:{overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false},
     hovermode:"closest",legend:{orientation:"h",y:1.14,font:{size:10}}},{responsive:true,displaylogo:false});
-  // within-month signature: one bar per period (single window, period-coloured) OR grouped by window
-  let sigTr;
-  if(wl.length===1){ const s=a;
-    sigTr=[{type:"bar",x:["P1","P2","P3","P4"],y:s.sig,marker:{color:PCOL},width:0.6,
-      error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.4)",thickness:1.2,width:4},
-      customdata:PLAB.map((l,p)=>[l,s.sn[p]]),hovertemplate:"%{customdata[0]}<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"}];
+  // within-month signature: single window -> box per period (mean+points); multiple -> grouped median bars per window
+  let sigTr, sigLayout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},
+    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"P&L (bp)"},xaxis:{gridcolor:"#2d3a48"}};
+  if(wl.length===1){
+    sigTr=[1,2,3,4].map(p=>({type:"box",name:"P"+p,x:(a.rawP[p]||[]).map(()=>"P"+p),y:a.rawP[p]||[],text:a.rawPy[p]||[],
+      boxmean:true,boxpoints:"all",jitter:0.5,pointpos:0,marker:{color:PCOL[p-1],size:3,opacity:.4},line:{color:PCOL[p-1],width:1},fillcolor:PCOL[p-1]+"22",
+      hovertemplate:"%{text} · P"+p+": %{y:+.3f} bp<extra></extra>"}));
+    sigLayout.showlegend=false;
   } else { sigTr=wl.map(w=>{ const s=seasonalAgg(winCutOf(w));
       return {type:"bar",name:WINLBL[w],x:["P1","P2","P3","P4"],y:s.sig,marker:{color:WINCOL[w]},
         error_y:{type:"data",symmetric:false,array:s.sig.map((v,p)=>v==null?0:s.sq3[p]-v),arrayminus:s.sig.map((v,p)=>v==null?0:v-s.sq1[p]),color:"rgba(230,237,243,.3)",thickness:1,width:3},
-        customdata:s.sn.map((n,p)=>[PLAB[p],n]),hovertemplate:"%{customdata[0]} ["+WINLBL[w]+"]<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"};}); }
-  Plotly.react("seassig",sigTr,{
-    paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:8,b:26},barmode:"group",
-    showlegend:wl.length>1,legend:{orientation:"h",y:1.2,font:{size:10}},
-    yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"median (bp)"},xaxis:{gridcolor:"#2d3a48"}},
-    {responsive:true,displaylogo:false});
+        customdata:s.sn.map((n,p)=>[PLAB[p],n]),hovertemplate:"%{customdata[0]} ["+WINLBL[w]+"]<br>median %{y:+.3f} bp (n=%{customdata[1]})<extra></extra>"};});
+    sigLayout.barmode="group"; sigLayout.showlegend=true; sigLayout.legend={orientation:"h",y:1.2,font:{size:10}};
+  }
+  Plotly.react("seassig",sigTr,sigLayout,{responsive:true,displaylogo:false});
   const desc=S.smetric==="be"?("<b>Breakeven = TIPS − "+S.beta+"%·UST</b> (β=100% is the plain DV01-matched breakeven)")
                              :("<b>"+MNAME[S.smetric]+"</b> leg");
-  $("seascap").innerHTML="Showing "+desc+" per auction-cycle period — <b>"+filtDesc()+"</b>. Bars = "
-    +"<b>median across years</b> of the bucket-summed P&L (bp on 100k DV01; ×$100k = $); whiskers = "
-    +"25–75th pctile; gold = cumulative seasonal path. Split around the month's single TIPS auction (A0..A4, ±1w).";
+  $("seascap").innerHTML="Showing "+desc+" per auction-cycle period — <b>"+filtDesc()+"</b>. Each <b>box</b> = "
+    +"the across-years distribution of that bucket's summed P&L (bp on 100k DV01; ×$100k = $): box = 25–75th "
+    +"(IQR), whiskers = 1.5×IQR, solid line = median, dashed = <b>mean</b>; faint points = each year (hover for "
+    +"year + value). Gold = cumulative Σ-median path. Split around the month's single TIPS auction (A0..A4, ±1w)."
+    +(winList().length>1?" Signature compares your selected windows (grouped median bars).":"");
 }
 function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
@@ -446,13 +475,13 @@ function drawHistory(){
     +" Tick periods + pick a month at left (e.g. P1 only + All months = every month's P1 through time; P3 + Jan = each January's P3).";
 }
 // ============ Calendar effect: average daily P&L by business-day-of-month ============
-function ymNewMap(){ const s=DATA[S.tenor].seas,mp={}; for(let i=0;i<s.y.length;i++)mp[s.y[i]*12+s.m[i]]=s.n[i]; return mp; }
-function seasonalCalendar(cut){
+function ymNewMap(tenor){ const s=DATA[tenor||S.tenor].seas,mp={}; for(let i=0;i<s.y.length;i++)mp[s.y[i]*12+s.m[i]]=s.n[i]; return mp; }
+function seasonalCalendar(cut, tenor){
   // Per-DAY: tag each day with its business-day-of-month (its ordinal among the trading days of its
   // month) and aggregate the metric by that key across the filtered sample. S.calend="end" counts
   // from the LAST trading day (key −1 = last day, −2 = second-last) so month-ends align across months
   // (turn-of-month) instead of smearing at the high forward-BDOMs (months run 19–23 trading days).
-  const d=DATA[S.tenor], beta=S.beta/100, nm=ymNewMap();
+  const d=DATA[tenor||S.tenor], beta=S.beta/100, nm=ymNewMap(tenor);
   const valOf=i=>S.smetric==="tips"?d.rT[i]:S.smetric==="nom"?d.rU[i]:d.rT[i]-beta*d.rU[i];
   const hol=i=>d.dd[i]===0;                                     // bond-market holiday (stale d=0 row): not a trading day
   const T={}; for(let i=0;i<d.dates.length;i++){ if(hol(i))continue; const ym=d.dates[i].slice(0,7); T[ym]=(T[ym]||0)+1;}  // real trading days/month
@@ -485,14 +514,18 @@ function drawCalendar(){
     xaxis:{title:xtitle,gridcolor:"#2d3a48",dtick:1},
     yaxis:{title:"median daily P&L (bp)",gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a"},
     hovermode:"closest",legend:{orientation:"h",y:1.12,font:{size:10}}};
-  if(wl.length===1){                                            // single window: bars + cumulative path
+  if(S.tenors.length>1){                                        // overlay TENORS (primary window): one median line each
+    traces=S.tenors.map(t=>{ const a=seasonalCalendar(winCutOf(winMain()), t);
+      return {type:"scatter",mode:"lines+markers",name:t,x:a.keys,y:a.med,line:{color:TCOL[t],width:1.7},marker:{size:4,color:TCOL[t]},
+        customdata:a.ns,hovertemplate:"day %{x} ["+t+"]: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};});
+  } else if(wl.length===1){                                     // single tenor + window: bars + cumulative path
     const a=seasonalCalendar(winCutOf(wl[0]));
     traces=[{type:"bar",name:"median",x:a.keys,y:a.med,marker:{color:"#2f81f7"},
       error_y:{type:"data",symmetric:false,array:a.med.map((v,i)=>v==null?0:a.q3[i]-v),arrayminus:a.med.map((v,i)=>v==null?0:v-a.q1[i]),color:"rgba(230,237,243,.22)",thickness:1,width:0},
       customdata:a.ns,hovertemplate:"day %{x}: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"},
       {type:"scatter",mode:"lines",name:"cumulative",yaxis:"y2",x:a.keys,y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.2f} bp<extra></extra>"}];
     layout.yaxis2={overlaying:"y",side:"right",title:"cumulative (bp)",showgrid:false,zeroline:false};
-  } else {                                                      // multiple windows: one median line each
+  } else {                                                      // single tenor, multiple windows: one median line each
     traces=wl.map(w=>{ const a=seasonalCalendar(winCutOf(w));
       return {type:"scatter",mode:"lines+markers",name:WINLBL[w],x:a.keys,y:a.med,line:{color:WINCOL[w],width:1.6},marker:{size:4,color:WINCOL[w]},
         customdata:a.ns,hovertemplate:"day %{x} ["+WINLBL[w]+"]: median %{y:+.3f} bp (n=%{customdata})<extra></extra>"};});
@@ -500,7 +533,8 @@ function drawCalendar(){
   Plotly.react("seascalchart",traces,layout,{responsive:true,displaylogo:false});
   $("calcap").innerHTML="The <b>calendar effect</b>: median daily P&L by <b>"+(S.calend==="end"?"day from month-end":"business day of month")
     +"</b>, independent of the auction cycle — <b>"+filtDesc()+"</b>, "+monthLbl()
-    +(wl.length===1?". Bars = median (whiskers 25–75th); gold = cumulative within-month path."
+    +(S.tenors.length>1?". One line per <b>tenor</b> ("+WINLBL[winMain()]+" window)."
+        :wl.length===1?". Bars = median (whiskers 25–75th); gold = cumulative within-month path."
                    :". One line per sample window (compare degradation).")
     +" Note x = trading days (≈19–23/month), not calendar dates; use From-end to align the turn-of-month.";
 }
@@ -536,12 +570,20 @@ function ols(xs,ys){
 }
 function regResults(cut){
   const mbF=monthBuckets(cut,true), mbW=monthBuckets(cut,false);   // filtered (predictor) + window-only (next-month target)
-  return REGS.map(R=>{ const xs=[],ys=[];
+  const res=REGS.map(R=>{ const xs=[],ys=[];
     for(const ym in mbF){ const b=mbF[ym], tb=R.cross?mbW[(+ym)+1]:b;   // cross: target = next calendar month
       if(!tb) continue;
       const xv=R.fx(b), yv=R.fy(tb);
       if(xv==null||yv==null||isNaN(xv)||isNaN(yv))continue; xs.push(xv); ys.push(yv); }
     return {key:R.key,lab:R.lab,xs,ys,f:ols(xs,ys)}; });
+  // month -> next month: each month's TOTAL P&L (P1+P2+P3+P4) predicts the next month's total.
+  // Adjacency follows the FILTERED set (sorted), so Issue=New gives Jan->Feb->Apr->Jul->Oct->Jan...
+  const yms=Object.keys(mbF).map(Number).sort((a,b)=>a-b);
+  const tot=ym=>{const b=mbF[ym]; return (b[1]||0)+(b[2]||0)+(b[3]||0)+(b[4]||0);};
+  const xs=[],ys=[];
+  for(let i=0;i+1<yms.length;i++){ xs.push(tot(yms[i])); ys.push(tot(yms[i+1])); }
+  res.push({key:"M>Mn",lab:"month → next month",xs,ys,f:ols(xs,ys)});
+  return res;
 }
 function regTable(res){
   let h="<table><thead><tr><th>relationship</th><th>n</th><th>slope</th><th>R²</th><th>corr</th><th>t-stat</th></tr></thead><tbody>";
@@ -604,9 +646,12 @@ function downloadCSV(){
 function seg(id,key,after){ $(id).querySelectorAll("button").forEach(b=>b.onclick=()=>{
   S[key]=b.dataset[key]; $(id).querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); (after||render)(); });}
 const tenWrap=$("tenor"); TENORS.forEach(t=>{const b=document.createElement("button");b.textContent=t;b.dataset.tenor=t;
-  if(t===S.tenor)b.classList.add("on"); tenWrap.appendChild(b);});
-tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{S.tenor=b.dataset.tenor;
-  tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render();});
+  if(S.tenors.includes(t))b.classList.add("on"); tenWrap.appendChild(b);});
+tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.tenor;   // multi-toggle (>=1 stays on)
+  if(S.tenors.includes(t)){ if(S.tenors.length>1) S.tenors=S.tenors.filter(x=>x!==t); }
+  else S.tenors=TENORS.filter(x=>S.tenors.includes(x)||x===t);                            // add, keep tenor order
+  S.tenor=S.tenors[0];                                                                     // primary = first selected
+  tenWrap.querySelectorAll("button").forEach(x=>x.classList.toggle("on",S.tenors.includes(x.dataset.tenor))); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
 seg("issue","issue"); seg("calend","calend");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{

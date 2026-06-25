@@ -87,10 +87,10 @@ python export.py --no-update                :: export from the cached data as-is
 
 :: --- interactive HTML dashboard (recommended; instant, offline, no server) ---
 python dashboard.py                         :: refresh, then build dashboard.html and open it
-                                            ::   views: Chart | Table | SEASONAL (auction-cycle).
-                                            ::   controls: tenor, repo x_TIPS/x_UST sliders, date range
-                                            ::   (Full/5y/1y/YTD), monthly|daily, Download-CSV; seasonal adds a
-                                            ::   TIPS/Nominal/Breakeven toggle + beta slider on Breakeven (TIPS-beta*UST).
+                                            ::   views: Chart | Table | SEASONAL (Aggregate/History/Calendar/Predict).
+                                            ::   tenor is MULTI-SELECT (overlay in Chart & Calendar); repo x_TIPS/x_UST
+                                            ::   sliders, date range; seasonal adds TIPS/Nominal/Breakeven + beta,
+                                            ::   sample window(s) Full/5Y/3Y, issue new/reopen, month/H1/H2.
                                             ::   all recompute is client-side JS -> no lag. Plotly embedded (offline).
 python dashboard.py --no-update             :: build from cached data (skip the Bloomberg pull)
 python dashboard.py --no-open               :: build but don't open the browser
@@ -158,20 +158,25 @@ day to the left:
   48-bar seasonal, cumulative path, within-month signature, and all phase-2 groupings — is a
   group-by on this one table.
 - **Metrics:** TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
-  75%; β = 100% is the plain DV01-matched breakeven). β is applied client-side per year-bucket
+  **100% = equal-DV01 / plain breakeven** baseline; lower β under-weights the UST leg). β is applied client-side per year-bucket
   before the median, so the slider is instant. Units are the engine's **bp** (= $/100k-DV01 P&L;
   ×$100k = dollars) — consistent with the Chart/Table views; the spec's "$/100k DV01" is the same
   series ×100,000.
-- **Aggregation:** median across years per `(month, period)` with a 25–75th IQR band and `n`;
-  empty/clamped buckets drop out. The "within-month signature" pools each period across all
-  months to isolate the pure auction cycle.
+- **Aggregation:** across years per `(month, period)` — shown as a **box plot** (box = 25–75th
+  IQR, whiskers = 1.5×IQR, solid = median, dashed = **mean**, faint points = each year), plus the
+  cumulative Σ-median path. Empty/clamped buckets drop out. The "within-month signature" pools
+  each period across all months to isolate the pure auction cycle.
 
 ### Dashboard Seasonal sub-modes & filters
 
-The Seasonal view has four sub-modes (toggle) and three shared filters, all computed client-side
-off the shipped `seas` table (so every control is instant):
+The Seasonal view has four sub-modes (toggle) and the shared filters below, all computed
+client-side off the shipped `seas` table (so every control is instant). **Tenor is multi-select**
+(toggle, ≥1 on): with several tenors the **Chart** and the seasonal **Calendar** overlay one line
+per tenor; all other views use the first-selected (primary) tenor.
 
-- **Aggregate** — the 48-bar seasonal + cumulative path + within-month signature (above).
+- **Aggregate** — box-and-whisker per (month, period): box = IQR, whiskers = 1.5×IQR, solid =
+  median, dashed = mean, faint points = each year (hover → year + value); + cumulative path + the
+  within-month signature (per-period boxes; grouped median bars when comparing windows).
 - **History** — each `(year, month, period)` bucket as a point over time (high-contrast lines,
   x = year), with period **checkboxes** + Month filter (e.g. P1 + all months = every P1 over time;
   P3 + Jan = each January's P3). Dashed line = median of the selection.
@@ -181,17 +186,19 @@ off the shipped `seas` table (so every control is instant):
   high BDOMs have lower `n` (months run 19–23 trading days). A **From start / From end** toggle
   flips the count: *from end* keys the last trading day as −1, −2, … so **month-ends align** across
   months — the clean way to read the turn-of-month effect (which otherwise smears at BDOM 20–23).
-  Bars + cumulative within-month path; Month filter to isolate one month.
+  Single tenor+window → bars + cumulative path; multiple **tenors** → one line per tenor; multiple
+  **windows** → one line per window. Month filter to isolate one month.
 - **Predict** — OLS regressions across months: **P1→P2, P2→P3, P3→P4, P2+P3→P4, (P1+P2)→P3,
-  (P1+P2)→(P3+P4)**, plus the **cross-month P4→next-month P1** (this month's end vs next month's
-  start; filters anchor on the P4 month) — does early performance predict later? Table of slope /
-  R² / corr / t-stat / n (|t|>2 flagged) + a scatter with the OLS line (pick the relationship at
-  left). Each observation is one month; respects metric/β and all filters. With multiple windows
-  the table shows a block per window (degradation comparison). Linear OLS first; richer models later.
+  (P1+P2)→(P3+P4)**, the **cross-month P4→next-month P1** (filters anchor on the P4 month), and
+  **month→next month** (each month's *total* P&L vs the next; adjacency follows the **filtered**
+  set, so Issue=New gives Jan→Feb→Apr→Jul→Oct→…) — does early performance predict later? Table of
+  slope / R² / corr / t-stat / n (|t|>2 flagged) + a scatter with the OLS line (pick the
+  relationship at left). One observation per month; respects metric/β and all filters; multiple
+  windows → a table block per window (degradation comparison). Linear OLS first; richer models later.
 
 Shared filters (apply to all sub-modes):
 - **Metric** — TIPS leg, Nominal (UST) leg, or **Breakeven** = `TIPS − β·UST` (β slider, default
-  75%; β = 100% = plain DV01-matched). β applied per year-bucket *before* the median, so the
+  **100% = equal-DV01 / plain DV01-matched** baseline). β applied per year-bucket *before* the median, so the
   slider is instant. Units = engine **bp** (= $/100k-DV01 P&L; ×$100k = dollars).
 - **Sample window(s)** — **Full / 5Y / 3Y** as **checkboxes** (multi-select). Check several to
   **overlay/compare** them in the views where that's readable: the within-month **signature**
