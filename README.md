@@ -12,6 +12,37 @@ choices — DV01-normalized **linear** bp (100k DV01/leg, rebalanced monthly), *
 financing with a tunable repo half-spread, and a **maturity-matched** OTR pairing — documented
 in reference.MD's "As-built" section and in `engine.py`.
 
+## European & UK inflation-linked bonds (Phase 1 — in progress)
+
+The build is being extended to **Italian, French, Spanish, German and UK** linkers. Spec:
+[reference_intl.MD](reference_intl.MD). **Phase 1 = outright per-bond financed total return, one
+sheet per bond** (no breakeven leg, no gas hedge, no visualizer yet — those wait on desk
+decisions in reference_intl §8). The US engine's spine is reused; `pricing.py` is reused
+unchanged; what differs per market (inflation index, indexation lag, coupon **frequency**,
+settlement **calendar/lag**, deflation **floor**, local financing curve) is encoded in
+`linkers.MARKETS`. There is **no OTR roll** — each bond is walked end-to-end.
+
+```bat
+:: separate ./cache_intl cache; keeps the US ./cache untouched. Needs the Terminal for pulls.
+python linkers.py markets               :: print the per-market convention matrix
+python linkers.py universe              :: build cache_intl/universe.csv from the curated SEED_UNIVERSE
+python linkers.py enrich                :: pull Bloomberg static for every ISIN (confirm coupon/maturity/base CPI)
+python data_layer_intl.py macro         :: pull reference indices (euro HICPxt / French CPIxt / UK RPI) + €STR/SONIA
+python data_layer_intl.py bonds         :: pull static + daily (LEAN: clean+yield) per ISIN — one bond at a time, date-chunked, resumable, skips failures
+python data_layer_intl.py ircheck       :: merge BBG INDEX_RATIO (last 3y) as the IR_bbg cross-check (run after `bonds`)
+python auctions_intl.py build           :: auction/syndication calendar: BBG bond-level + DMO tap-level (see `sources`)
+python engine_intl.py                   :: build every active bond -> cache_intl/returns/<isin>.parquet
+python engine_intl.py FR0010135525      :: one bond + summary
+python export_intl.py                   :: exports/linkers_returns.xlsx (one sheet per bond) + per-bond CSVs
+python export_intl.py --no-update       :: export from cache_intl as-is (no Bloomberg pull)
+```
+
+Files added: `linkers.py` (conventions + universe), `data_layer_intl.py` (pulls + index ratio),
+`engine_intl.py` (per-bond financed TR), `auctions_intl.py` (issuance calendar), `export_intl.py`
+(per-bond sheets). Reference-index tickers and €STR/SONIA tickers in `linkers.py` are best-known
+and **flagged to verify on the terminal** on the first pull (the US field map was likewise
+validated live before being trusted).
+
 ## Setup (contained env)
 
 ```bat

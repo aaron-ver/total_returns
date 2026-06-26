@@ -5,6 +5,7 @@ __pycache__/
 
 # Cached market data (regenerable from Bloomberg / TreasuryDirect; can be large)
 cache/
+cache_intl/
 
 # Generated charts
 plots/*.png

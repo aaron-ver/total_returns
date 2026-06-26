@@ -42,12 +42,26 @@ def close_session():
         _SHARED = None
 
 
-def _drain(s, on_msg):
+def _drain(s, on_msg, max_idle=4):
+    """Pump events until the final RESPONSE. Guards against a backend stall: a `BACKEND.TIMEOUT`
+    delivers no RESPONSE, so the naive `while True` loops forever (the freeze seen on heavy
+    history batches). If we get `max_idle` consecutive TIMEOUT events (~max_idle*10s of silence)
+    we raise TimeoutError instead of hanging. Normal requests stream PARTIAL_RESPONSE/RESPONSE
+    quickly, so the idle counter resets and this never fires on a healthy request."""
+    idle = 0
     while True:
         ev = s.nextEvent(10000)
+        et = ev.eventType()
+        if et == blpapi.Event.TIMEOUT:
+            idle += 1
+            if idle >= max_idle:
+                raise TimeoutError(f"Bloomberg request stalled (~{max_idle * 10}s no events; "
+                                   f"backend timeout?). Use smaller batches / fewer fields.")
+            continue
+        idle = 0
         for msg in ev:
             on_msg(msg)
-        if ev.eventType() == blpapi.Event.RESPONSE:
+        if et == blpapi.Event.RESPONSE:
             break
 
 
