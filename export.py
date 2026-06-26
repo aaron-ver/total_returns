@@ -40,6 +40,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = engine.CACHE
 EXPORTS = os.path.join(HERE, "exports")
 TENORS = ["5y", "10y", "30y"]
+# Single hedge window for the per-tenor PnL columns (the hedge SHEET keeps both 2y & 5y). The
+# desk asked for a single-select window here to keep the daily sheets simple; flip to "2y" if
+# preferred. The dashboard exposes a live 2y/5y toggle.
+EXPORT_HEDGE_WINDOW = "5y"
 
 # Output column order (per-tenor sheet), built in tenor_full().
 FULL_COLS = [
@@ -123,13 +127,21 @@ ENERGY_README_ROWS = [
                     "Use `chg` to re-normalize to a $/contract (x420 for RBOB) or DV01 basis."),
     ("--- on each TENOR sheet ---", "Every energy column above also appears on the 5y/10y/30y "
         "sheets suffixed '_gas' (XB1_gas, usd_per_contract_gas, ...), aligned to the bond days "
-        "(a bond day with no gas obs -> NaN; that move lands on the next common day). Plus:"),
-    ("hedge_contracts_gas", "the month's gasoline hedge ratio for THIS tenor, in # of 42,000-gal "
-        "contracts per 100k-DV01 breakeven (5-day-block estimator). Set at the month's rebalance "
-        "from a trailing 2yr regression of breakeven $ on gas $/contract, held all month (in sync "
-        "with the DV01 rebalance). Positive => co-moving; SHORT this many to hedge a LONG breakeven."),
-    ("hedge_contracts_daily_gas", "same hedge ratio from the day-on-day regression (cross-check; "
-        "~500 pairs/2yr vs ~100 for the 5-day blocks). See hedge.py and cache/hedge_ratios.parquet."),
+        "(a bond day with no gas obs -> NaN; that move lands on the next common day). Plus the "
+        "gasoline-hedge columns below (window = the `hedge` sheet's both-window detail, condensed "
+        "here to a single selected window shown in `gas_hedge_window`):"),
+    ("gas_hedge_window", "which trailing window the per-tenor hedge ratios/PnL below use (2y or 5y)."),
+    ("gas_hedge_contracts_BE100 / _BE75", "the month's gasoline hedge ratio for THIS tenor, in # of "
+        "42,000-gal contracts, from a trailing daily regression of breakeven $ on gas $/contract, "
+        "held all month (in sync with the DV01 rebalance). BE100 = pure breakeven (β=1); BE75 = "
+        "75%-beta breakeven (TIPS − 0.75·UST). Positive => co-moving; SHORT this many vs a LONG BE."),
+    ("r_BE75_bp", "75%-beta breakeven daily return = r_TIPS_bp − 0.75·r_UST_bp (vs r_BE_bp = β=100%)."),
+    ("r_BE100_hedged_bp / r_BE75_hedged_bp", "gas-HEDGED daily breakeven return (bp) = BE − "
+        "h·(gas $/contract)/$100k, where h is that month's BE100 / BE75 contract ratio. Months "
+        "before the first ratio (window not full yet) are unhedged (h=0)."),
+    ("cum_BE100_hedged_bp / cum_BE75_bp / cum_BE75_hedged_bp", "running LINEAR sums (bp) of the "
+        "hedged BE100, the unhedged BE75, and the hedged BE75 daily returns (cf. cum_BE_bp = "
+        "unhedged BE100). The hedge SHEET carries the full monthly ratios + R² for both betas/windows."),
 ]
 
 
@@ -207,33 +219,60 @@ def tenor_full(tenor):
         g = nrg.reindex(out.index)
         for col in nrg.columns:
             out[f"{col}_gas"] = g[col]
-        out["hedge_contracts_gas"] = hedge.daily_hedge(tenor, out.index, "hedge_contracts")
-        out["hedge_contracts_daily_gas"] = hedge.daily_hedge(tenor, out.index, "hedge_contracts_daily")
+        # gasoline hedge (selected window EXPORT_HEDGE_WINDOW): contract ratio for the pure
+        # breakeven (BE100, β=1) and the 75%-beta breakeven (BE75, β=0.75), held each month, plus
+        # the gas-HEDGED daily/cum P&L. Hedged BE = BE − h·(gas $/contract)/$100k  [short h contracts
+        # vs long BE]. Early months with no ratio yet are unhedged (h treated as 0 for the P&L).
+        W = EXPORT_HEDGE_WINDOW
+        gas = hedge.daily_gas_usd(out.index)                       # 0-filled daily gas $/contract
+        h100 = hedge.daily_hedge_beta(tenor, out.index, W, 1.0)
+        h75 = hedge.daily_hedge_beta(tenor, out.index, W, 0.75)
+        out["gas_hedge_window"] = W
+        out["gas_hedge_contracts_BE100"] = h100
+        out["gas_hedge_contracts_BE75"] = h75
+        out["r_BE75_bp"] = out["r_TIPS_bp"] - 0.75 * out["r_UST_bp"]
+        out["r_BE100_hedged_bp"] = out["r_BE_bp"] - h100.fillna(0.0) * gas / 1e5
+        out["r_BE75_hedged_bp"] = out["r_BE75_bp"] - h75.fillna(0.0) * gas / 1e5
+        out["cum_BE100_hedged_bp"] = out["r_BE100_hedged_bp"].cumsum()
+        out["cum_BE75_bp"] = out["r_BE75_bp"].cumsum()
+        out["cum_BE75_hedged_bp"] = out["r_BE75_hedged_bp"].cumsum()
     return out
 
 
 ENERGY_COLS = ["XB1", "XB2", "prior_mark", "days", "is_roll", "chg", "usd_per_contract", "r_bp", "cum_bp"]
 
 
-HEDGE_COLS = ["tenor", "rebalance_date", "hedge_contracts", "r2_block", "corr_block",
-              "tstat_block", "n_block", "hedge_contracts_daily", "r2_daily", "corr_daily",
-              "tstat_daily", "n_daily"]
+HEDGE_COLS = ["tenor",
+              "BE100_2y", "BE100_2y_R2", "BE100_5y", "BE100_5y_R2",
+              "BE75_2y", "BE75_2y_R2", "BE75_5y", "BE75_5y_R2", "n_2y", "n_5y"]
 
 
 def hedge_full():
-    """The monthly walk-forward hedge-ratio table (contracts per 100k-DV01 BE, per tenor), or
-    None if unavailable. One row per (tenor, rebalance month). See hedge.py."""
-    try:
-        df = hedge.load_ratios()
-    except Exception:
+    """Monthly walk-forward hedge-ratio table per tenor — BOTH the pure breakeven (BE100, β=1.0)
+    and the 75%-beta breakeven (BE75, β=0.75), each for the 2y and 5y windows, with R². One row
+    per (tenor, rebalance month). None if unavailable. See hedge.py."""
+    frames = []
+    for ten in TENORS:
         try:
-            df = hedge.build_all(save=True)
+            a = hedge.monthly_hedge_ratios(ten, beta=1.0)     # BE100
+            b = hedge.monthly_hedge_ratios(ten, beta=0.75)    # BE75 (same rebalance months/order)
         except Exception as e:
-            print(f"  hedge sheet skipped — no data ({type(e).__name__}: {e})")
-            return None
-    if df is None or df.empty:
+            print(f"  hedge sheet {ten} skipped ({type(e).__name__}: {e})")
+            continue
+        if a.empty:
+            continue
+        m = pd.DataFrame({"tenor": ten}, index=a["month"].dt.to_period("M").astype(str))
+        for w in ("2y", "5y"):
+            m[f"BE100_{w}"] = a[f"hedge_contracts_{w}"].to_numpy()
+            m[f"BE100_{w}_R2"] = a[f"r2_{w}"].to_numpy()
+            m[f"BE75_{w}"] = b[f"hedge_contracts_{w}"].to_numpy()
+            m[f"BE75_{w}_R2"] = b[f"r2_{w}"].to_numpy()
+            m[f"n_{w}"] = a[f"n_{w}"].to_numpy()
+        frames.append(m)
+    if not frames:
+        print("  hedge sheet skipped — no data")
         return None
-    df = df.set_index(df["month"].dt.to_period("M").astype(str)).reindex(columns=HEDGE_COLS)
+    df = pd.concat(frames).reindex(columns=HEDGE_COLS)
     df.index.name = "rebalance_month"
     return df
 

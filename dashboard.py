@@ -13,8 +13,16 @@ to such a view collapses to the primary). Windows are shared. The two repo half-
 everywhere now (chart, table AND every seasonal view): they net the financing cost off each leg
 (TIPS by x_TIPS, UST by x_UST; the breakeven scales the UST cost by beta); set both 0 for mid.
 
+Gasoline hedge: the Chart, Table and the seasonal Breakeven metric all support a β slider
+(BE = TIPS − β·UST, default 100%), a gas-hedge ON/OFF toggle, and a 2Y/5Y hedge-window toggle.
+When on, the breakeven P&L is netted against a short gasoline position sized by the month's hedge
+ratio h(β) = bT − β·bU contracts (the per-leg gas-regression slopes over the chosen rolling
+window, walk-forward, rebalanced monthly in sync with the DV01 rebalance; see hedge.py). All
+client-side off the shipped daily gas series + monthly (bT,bU) coefficients.
+
 Three views (top-left toggle):
-  * Chart  -- single tenor: cumulative long/short/mid breakeven net P&L (repo half-spread sliders).
+  * Chart  -- single tenor: cumulative long/short/mid breakeven net P&L (repo half-spread sliders,
+    β, optional gas hedge).
     Multiple tenors: one cumulative LONG-BE line per tenor (repo half-spread applied; set both
     sliders 0 for mid) + per-tenor totals across the top.
   * Table  -- the same, as daily or monthly rows with a window total (primary tenor).
@@ -60,6 +68,7 @@ import os, sys, json, webbrowser
 import pandas as pd
 
 import engine
+import hedge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TENORS = ["5y", "10y", "30y"]
@@ -83,6 +92,7 @@ def build_payload():
         d = engine.load_returns(t).dropna(subset=["r_BE_bp"])
         s = st[st["tenor"] == t]
         nn = lambda col: [None if pd.isna(v) else round(float(v), 4) for v in s[col]]
+        gas = hedge.daily_gas_usd(d.index)              # daily gas $/contract aligned to the chart dates
         data[t] = {
             "dates": [x.strftime("%Y-%m-%d") for x in d.index],
             "rT": [round(float(v), 4) for v in d["r_TIPS_bp"]],
@@ -91,11 +101,14 @@ def build_payload():
             "sT": [round(float(v), 6) for v in d["s_TIPS"]],
             "sU": [round(float(v), 6) for v in d["s_UST"]],
             "dd": [0 if pd.isna(v) else int(v) for v in d["days"]],   # settlement span; 0 = market holiday
+            "g": [round(float(v), 2) for v in gas],        # daily gas $/contract (for the gas hedge)
+            "hedge": hedge.hedge_coef_map(t),              # {window:{'YYYY-MM':[bT,bU]}} -> h(β)=bT−β·bU contracts
 
             "seas": {                                  # keystone bucket table (this tenor)
                 "y": [int(v) for v in s["year"]], "m": [int(v) for v in s["month"]],
                 "p": [int(v) for v in s["period"]], "t": nn("tips_pnl"), "u": nn("ust_pnl"),
                 "st": nn("tips_slip"), "su": nn("ust_slip"),   # Σ repo half-spread sensitivity (apply x_TIPS/x_UST)
+                "g": nn("gas_pnl"),                        # Σ gas $/contract in the bucket (gas hedge)
                 "d": [int(v) for v in s["trading_days"]], "c": [bool(v) for v in s["clamped"]],
                 "n": [bool(v) for v in s["new_issue"]],   # new-issue (vs reopening) month
             },
@@ -202,9 +215,13 @@ __PLOTLY__
     <div class="grp sv" style="display:none"><label>Seasonal metric</label><div class="seg" id="smetric">
       <button data-smetric="tips" class="on">TIPS</button><button data-smetric="nom">Nominal</button>
       <button data-smetric="be">Breakeven</button></div></div>
-    <div class="grp sv" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">100</span>%
+    <div class="grp bev" id="betagrp" style="display:none"><label>Beta (β) <span class="hl" id="betav">100</span>%
       &nbsp;<span class="note" style="padding:0">BE = TIPS − β·UST (β=100 = equal DV01)</span></label>
       <input type="range" id="beta" min="0" max="150" step="5" value="100"></div>
+    <div class="grp bev" id="gasgrp" style="display:none"><label>Gasoline hedge <span class="note" style="padding:0">BE − h·gas (short gas vs long BE)</span></label>
+      <div class="seg" id="gas"><button data-gas="off" class="on">Off</button><button data-gas="on">On</button></div></div>
+    <div class="grp bev" id="gwingrp" style="display:none"><label>Hedge window <span class="note" style="padding:0">rolling regression lookback</span></label>
+      <div class="seg" id="gwin"><button data-gwin="2y">2Y</button><button data-gwin="5y" class="on">5Y</button></div></div>
     <div class="grp sv" style="display:none"><label>Sample window(s)</label>
       <div class="checks" id="swin">
         <label><input type="checkbox" value="full" checked><span class="sw" style="background:#2f81f7"></span><b>Full</b><span class="rng">2011 → now</span></label>
@@ -243,7 +260,11 @@ __PLOTLY__
       (long pays GC+x, short earns GC&minus;x), so they are not mirror images. Mid = zero spread.
       The two repo half-spread sliders apply <b>everywhere</b> (chart, table and every seasonal view):
       they net the financing cost off each leg (TIPS by x_TIPS, UST by x_UST; β scales the UST cost).
-      Set both 0 for mid. Specialness not modeled. Full data: <code>python export.py</code>.</p>
+      Set both 0 for mid. <b>β</b>, <b>gasoline hedge</b> and the <b>hedge window</b> act on the
+      breakeven (Chart, Table &amp; the seasonal Breakeven metric): hedged BE = BE &minus;
+      h·(gas&nbsp;$/contract)/$100k, h = the month's contracts ratio (bT&minus;β·bU) from the 2Y/5Y
+      rolling regression, held all month. Months before a window is full are unhedged. Specialness
+      not modeled. Full data: <code>python export.py</code>.</p>
   </div>
   <div class="main">
     <div class="totals rv" id="totals"></div>
@@ -282,7 +303,7 @@ __PLOTLY__
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, gas:"off", gwin:"5y", seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -290,6 +311,13 @@ const PLAB=["P1 · prev m/e → auction−1w","P2 · auction−1w → auction","
 const $ = id => document.getElementById(id);
 const fmt = (x,d=1) => (x>=0?"+":"") + x.toFixed(d);
 const cls = x => x>=0?"pos":"neg";
+// --- gasoline hedge: h(β) = bT − β·bU contracts (per tenor/window/month); hedged BE $ = BE$ − h·gas$ ---
+function hLookup(hedgeObj, ym, beta){          // ym = "YYYY-MM"; returns contracts h(β) for the active window, or null
+  if(!hedgeObj) return null; const o=hedgeObj[S.gwin]; if(!o) return null;
+  const c=o[ym]; return c ? c[0]-beta*c[1] : null; }
+function gasOn(){ return S.gas==="on"; }
+function gasNote(){ return gasOn()?", gas-hedged "+S.gwin.toUpperCase():""; }   // appended to BE metric labels
+function cfgLab(){ return "β="+S.beta+"%"+(gasOn()?", gas-hedged "+S.gwin.toUpperCase():""); }   // chart/totals tag
 
 function winIdx(){
   const d = DATA[S.tenor], n = d.dates.length; let lo=0, hi=n-1;
@@ -300,10 +328,13 @@ function winIdx(){
 function series(){
   const {d,lo,hi} = winIdx();
   const o = {dates:[],rT:[],rU:[],rBE:[],lBE:[],sBE:[],cL:[],cS:[],cM:[]};
+  const beta=S.beta/100, gh=gasOn();
   let cl=0,cs=0,cm=0;
   for(let i=lo;i<=hi;i++){
-    const slip = S.xT*d.sT[i] + S.xU*d.sU[i];
-    const lbe = d.rBE[i]-slip, sbe = -d.rBE[i]-slip, mid = d.rBE[i];
+    const be = d.rT[i]-beta*d.rU[i];                       // breakeven (β-weighted nominal)
+    const slip = S.xT*d.sT[i] + beta*S.xU*d.sU[i];         // repo half-spread (β scales UST cost)
+    let hg=0; if(gh){ const h=hLookup(d.hedge, d.dates[i].slice(0,7), beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
+    const lbe = be-slip-hg, sbe = -be-slip+hg, mid = be-hg;  // gas: short h vs long BE -> ∓hg
     cl+=lbe; cs+=sbe; cm+=mid;
     o.dates.push(d.dates[i]); o.rT.push(d.rT[i]); o.rU.push(d.rU[i]); o.rBE.push(mid);
     o.lBE.push(lbe); o.sBE.push(sbe); o.cL.push(cl); o.cS.push(cs); o.cM.push(cm);
@@ -332,7 +363,9 @@ function applyView(){
   document.querySelectorAll(".pv").forEach(e=>e.style.display=(seasonal&&mode==="reg")?"":"none");        // regression picker
   document.querySelectorAll(".ev").forEach(e=>e.style.display=(seasonal&&mode==="event")?"":"none");      // event year + window
   document.querySelectorAll(".posv").forEach(e=>e.style.display=(seasonal||(S.view==="chart"&&S.tenors.length>1))?"":"none"); // long/short (cumulative views)
-  $("betagrp").classList.toggle("off", seasonal && S.smetric!=="be");   // β only acts on Breakeven
+  const bev = !seasonal || S.smetric==="be";                            // β / gas hedge / window apply to the breakeven (chart, table, seasonal-BE)
+  document.querySelectorAll(".bev").forEach(e=>e.style.display=bev?"":"none");
+  $("gwingrp").classList.toggle("off", !gasOn());                       // hedge window only matters when gas is on
   $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
   $("tablewrap").style.display=(!seasonal && S.view==="table")?"":"none";
   $("seaswrap").style.display=(seasonal&&mode==="agg")?"":"none";
@@ -353,11 +386,13 @@ function render(){
     let h=""; const isS=S.pos==="short", dir=isS?"short":"long";
     for(const t of S.tenors){ const c=cumBEFor(t), arr=isS?c.short:c.long, v=arr.length?arr[arr.length-1]:0;
       h+="<div class='tot'><span class='lab' style='color:"+TCOL[t]+"'>"+t+" "+dir+"-BE</span><b class='"+(v>=0?"pos":"neg")+"'>"+fmt(v,0)+"</b> bp</div>"; }
-    $("totals").innerHTML=h+"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+"</b></div>";
+    $("totals").innerHTML=h+"<div class='tot'><span class='lab'>config</span><b style='font-size:12px'>"+cfgLab()+"</b></div>"
+      +"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+"</b></div>";
   } else {
     $("totals").innerHTML="<div class='tot l'><span class='lab'>long breakeven</span><b>"+fmt(last(s.cL),0)+"</b> bp</div>"
       +"<div class='tot s'><span class='lab'>short breakeven</span><b>"+fmt(last(s.cS),0)+"</b> bp</div>"
-      +"<div class='tot m'><span class='lab'>mid (x=0)</span><b>"+fmt(last(s.cM),0)+"</b> bp</div>"
+      +"<div class='tot m'><span class='lab'>mid (repo x=0)</span><b>"+fmt(last(s.cM),0)+"</b> bp</div>"
+      +"<div class='tot'><span class='lab'>config</span><b style='font-size:12px'>"+cfgLab()+"</b></div>"
       +"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+(s.dates.length?" ("+s.dates.length+"d)":"")+"</b></div>";
   }
   if(S.view==="chart"){ S.tenors.length>1 ? drawChartMulti() : drawChart(s); } else { drawTable(s); }
@@ -371,26 +406,29 @@ function drawChart(s){
   const tr=(y,name,color)=>({x:s.dates,y:y,name:name,mode:"lines",line:{width:1.6,color:color},hovertemplate:"%{y:+.1f} bp<extra>"+name+"</extra>"});
   const data=[tr(s.cM,"mid","#8b98a5"),tr(s.cL,"long BE","#3fb950"),tr(s.cS,"short BE","#f85149")];
   const layout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
-    title:{text:S.tenor+" breakeven cumulative net P&L (bp, linear-sum)",font:{size:14}},
+    title:{text:S.tenor+" breakeven cumulative net P&L (bp, linear-sum) — "+cfgLab(),font:{size:14}},
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}};
   Plotly.react("chart",data,layout,{responsive:true,displaylogo:false});
 }
 const TCOL={"5y":"#4cc9f0","10y":"#f5a623","30y":"#e63946"};   // tenor colors for overlay
-function cumBEFor(tenor){                                       // cumulative LONG- and SHORT-BE (bp, repo half-spread applied) over the window
+function cumBEFor(tenor){                                       // cumulative LONG- and SHORT-BE (bp; β, repo half-spread & gas hedge applied) over the window
   const d=DATA[tenor], n=d.dates.length; let lo=0,hi=n-1;
   if(S.start){while(lo<n&&d.dates[lo]<S.start)lo++;}
   if(S.end){while(hi>=0&&d.dates[hi]>S.end)hi--;}
-  const xs=[],lng=[],sht=[]; let cl=0,cs=0;                     // short = −rBE − slip (matches series(): not an exact mirror, the half-spread is a cost both ways)
-  for(let i=lo;i<=hi;i++){ const slip=S.xT*d.sT[i]+S.xU*d.sU[i]; cl+=d.rBE[i]-slip; cs+=-d.rBE[i]-slip; xs.push(d.dates[i]); lng.push(cl); sht.push(cs); }
-  return {xs,long:lng,short:sht};   // at x=0 sliders long equals the mid breakeven and short is its exact mirror
+  const beta=S.beta/100, gh=gasOn();
+  const xs=[],lng=[],sht=[]; let cl=0,cs=0;                     // short = −BE − slip (matches series(): not an exact mirror, the half-spread is a cost both ways)
+  for(let i=lo;i<=hi;i++){ const be=d.rT[i]-beta*d.rU[i], slip=S.xT*d.sT[i]+beta*S.xU*d.sU[i];
+    let hg=0; if(gh){ const h=hLookup(d.hedge,d.dates[i].slice(0,7),beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
+    cl+=be-slip-hg; cs+=-be-slip+hg; xs.push(d.dates[i]); lng.push(cl); sht.push(cs); }
+  return {xs,long:lng,short:sht};   // at x=0/β=100/gas-off long equals the mid breakeven and short is its exact mirror
 }
 function drawChartMulti(){                                      // overlay tenors: one long- or short-BE line each (slider-responsive)
   const isS=S.pos==="short", dir=isS?"short":"long";
   const data=S.tenors.map(t=>{ const c=cumBEFor(t);
     return {x:c.xs,y:isS?c.short:c.long,name:t+" "+dir+"-BE",mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
   Plotly.react("chart",data,{paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
-    title:{text:S.tenors.join(" / ")+" "+dir+" breakeven cumulative (bp) — repo half-spread x_TIPS/x_UST applied (set both 0 for mid)",font:{size:14}},
+    title:{text:S.tenors.join(" / ")+" "+dir+" breakeven cumulative (bp) — "+cfgLab()+"; repo half-spread x_TIPS/x_UST applied (set both 0 for mid)",font:{size:14}},
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}},{responsive:true,displaylogo:false});
 }
@@ -411,16 +449,24 @@ function dirS(){ return S.pos==="short"?" — SHORT":""; }
 // Metric net of the repo half-spread. The half-spread is a financing COST in either direction
 // (long pays GC+x, short earns GC−x), so it is subtracted regardless of sgn(); at x=0 long/short
 // are exact mirrors. seasMetric works off the bucket-summed slippage (st/su); dayMetric off daily s.
-function seasMetric(t,u,ts,us){ const beta=S.beta/100; let v,slip;
+function seasMetric(sd,i){ const beta=S.beta/100; let v,slip;
+  const t=sd.t[i],u=sd.u[i],ts=sd.st[i],us=sd.su[i];
   if(S.smetric==="tips"){ v=t; slip=S.xT*(ts||0); }
   else if(S.smetric==="nom"){ v=u; slip=S.xU*(us||0); }
   else { if(t==null||u==null) return null; v=t-beta*u; slip=S.xT*(ts||0)+beta*S.xU*(us||0); }
-  return v==null?null:sgn()*v-slip; }
+  if(v==null) return null;
+  let hg=0;                                                     // gas hedge (breakeven only): h(β)·Σgas$/100k
+  if(S.smetric==="be" && gasOn()){ const ym=sd.y[i]+"-"+String(sd.m[i]).padStart(2,"0");
+    const h=hLookup(DATA[S.tenor].hedge, ym, beta); if(h!=null) hg=h*(sd.g[i]||0)/1e5; }
+  return sgn()*(v-hg)-slip; }
 function dayMetric(d,i){ const beta=S.beta/100; let v,slip;
   if(S.smetric==="tips"){ v=d.rT[i]; slip=S.xT*d.sT[i]; }
   else if(S.smetric==="nom"){ v=d.rU[i]; slip=S.xU*d.sU[i]; }
   else { v=d.rT[i]-beta*d.rU[i]; slip=S.xT*d.sT[i]+beta*S.xU*d.sU[i]; }
-  return v==null?null:sgn()*v-slip; }
+  if(v==null) return null;
+  let hg=0;
+  if(S.smetric==="be" && gasOn()){ const h=hLookup(d.hedge, d.dates[i].slice(0,7), beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
+  return sgn()*(v-hg)-slip; }
 function monthPass(m){ return S.smonths.includes(m); }
 function monthLbl(){ const a=S.smonths; if(a.length===12)return "all months"; if(!a.length)return "no months";
   return a.length<=4 ? a.slice().sort((x,y)=>x-y).map(m=>MONTHS[m-1]).join(", ") : a.length+" months"; }
@@ -438,7 +484,7 @@ function seasonalAgg(cut){
   // per (year,month,period) the bucket-SUMMED leg P&L (bp). metric: TIPS=t, Nominal=u, Breakeven=
   // t-(β/100)·u. Stack across YEARS with the median per (month,period); IQR (q25..q75) + n.
   const sd=DATA[S.tenor].seas;
-  const valOf=i=>seasMetric(sd.t[i],sd.u[i],sd.st[i],sd.su[i]);    // net of repo half-spread (sliders)
+  const valOf=i=>seasMetric(sd,i);    // net of repo half-spread (sliders) + gas hedge (β·BE)
   const byMP={}, byMPy={}, byP={1:[],2:[],3:[],4:[]}, byPy={1:[],2:[],3:[],4:[]}, clMP={};
   for(let i=0;i<sd.y.length;i++){ if(!rowPass(sd,i,false,cut))continue;   // window + issue (not month: this IS the by-month view)
     const v=valOf(i); if(v==null)continue;
@@ -456,6 +502,7 @@ function seasonalAgg(cut){
   return {med,q1,q3,ns,clamp,cum,sig,sq1,sq3,sn,rawMP:byMP,rawMPy:byMPy,rawP:byP,rawPy:byPy};
 }
 const MNAME={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
+function mlabel(){ return MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%"+gasNote()+")":"")+dirS(); }   // metric label + β/gas/dir
 function drawSeasonal(){
   const wl=winList(), a=seasonalAgg(winCutOf(winMain()));     // 48-box uses the longest selected window
   // box-and-whisker per (month, period): box=IQR, whiskers=1.5*IQR, solid=median, dashed=mean
@@ -471,7 +518,7 @@ function drawSeasonal(){
   const meanTr={type:"scatter",mode:"markers",name:"mean",x:mxx,y:myy,marker:MEANMARK,hovertemplate:"mean %{y:+.2f} bp<extra></extra>"};
   const cumTr={type:"scatter",mode:"lines",name:"cumulative (Σ medians)",yaxis:"y2",
     x:a.cum.map((_,i)=>i),y:a.cum,line:{color:"#d6a13a",width:2},hovertemplate:"cumulative %{y:+.1f} bp<extra></extra>"};
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const mname=mlabel();
   const yr=poolRange(Object.values(a.rawMP));
   Plotly.react("seastop",[...boxTr,meanTr,cumTr],{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:30},boxmode:"overlay",
@@ -520,7 +567,7 @@ function seasonalHistory(){
   // No aggregation: every (year,month,period) bucket as its own point, optionally filtered to one
   // period and/or one calendar month, returned per period sorted chronologically.
   const sd=DATA[S.tenor].seas, pday=[4,11,18,25], cut=winCutOf(winMain());   // day-of-month to place each period
-  const valOf=i=>seasMetric(sd.t[i],sd.u[i],sd.st[i],sd.su[i]);   // net of repo half-spread (sliders)
+  const valOf=i=>seasMetric(sd,i);   // net of repo half-spread (sliders) + gas hedge (β·BE)
   const byP={1:[],2:[],3:[],4:[]};
   for(let i=0;i<sd.y.length;i++){
     const p=sd.p[i],m=sd.m[i],y=sd.y[i];
@@ -532,7 +579,6 @@ function seasonalHistory(){
   for(const p in byP) byP[p].sort((a,b)=>a.x<b.x?-1:1);
   return byP;
 }
-const MNAME2={tips:"TIPS return",nom:"Nominal (UST) return",be:"Breakeven"};
 function drawHistory(){
   const byP=seasonalHistory(), periods=S.periods.slice().sort();
   const single=S.smonths.length<=2;                           // few months -> few pts/yr; markers help
@@ -544,7 +590,7 @@ function drawHistory(){
       hovertemplate:"%{x|%Y-%m} · P"+p+": %{y:+.2f} bp<extra></extra>"});
   }
   const med=median(all);
-  const mname=MNAME2[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const mname=mlabel();
   const perlbl=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join(",")||"none", monthlbl=monthLbl();
   Plotly.react("histchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:36,b:40},
@@ -592,7 +638,7 @@ function seasonalCalendar(cut, tenor){
   return {keys,med,q1,q3,ns,cum,raw:byB};
 }
 function drawCalendar(){
-  const wl=winList(), mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const wl=winList(), mname=mlabel();
   const xtitle = S.calend==="end" ? "business day from month-end  (−1 = last trading day)"
                                   : "business day of month  (1 = first trading day)";
   let traces, layout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:54,t:36,b:42},
@@ -628,7 +674,7 @@ function drawCalendar(){
     +" Note x = trading days (≈19–23/month), not calendar dates; use From-end to align the turn-of-month.";
 }
 // ============ Predict: OLS regressions between within-month periods ============
-function rowVal(s,i){ return seasMetric(s.t[i],s.u[i],s.st[i],s.su[i]); }   // net of repo half-spread (sliders)
+function rowVal(s,i){ return seasMetric(s,i); }   // net of repo half-spread (sliders) + gas hedge (β·BE)
 function monthBuckets(cut, withFilters){                        // {ym:{1,2,3,4}}; withFilters=issue+month, else window-only
   const s=DATA[S.tenor].seas, out={};
   for(let i=0;i<s.y.length;i++){
@@ -691,7 +737,7 @@ function drawPredict(){
     marker:{color:"#2f81f7",size:6,opacity:.7},hovertemplate:"predictor %{x:+.2f} → target %{y:+.2f} bp<extra></extra>"}];
   if(f){ const xmn=Math.min(...sel.xs),xmx=Math.max(...sel.xs);
     traces.push({type:"scatter",mode:"lines",name:"OLS fit",x:[xmn,xmx],y:[f.a+f.b*xmn,f.a+f.b*xmx],line:{color:"#f5a623",width:2}}); }
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const mname=mlabel();
   Plotly.react("regchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:54,r:20,t:34,b:42},
     title:{text:sel.lab+"   ("+mname+", "+WINLBL[winMain()]+" window"+(S.smonths.length===12?"":", "+monthLbl())+")"+(f?"   slope "+f.b.toFixed(2)+", R² "+f.r2.toFixed(2)+", t "+f.t.toFixed(1)+", n "+f.n:""),font:{size:13}},
@@ -709,7 +755,7 @@ function drawCumul(){
   const cut=winCutOf(winMain()), mb=monthBuckets(cut,true), periods=S.periods.slice().sort();
   const yms=Object.keys(mb).map(Number).sort((a,b)=>a-b);
   const plabel=periods.length===4?"P1–P4":periods.map(p=>"P"+p).join("+")||"none";
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const mname=mlabel();
   const labels=[], slices=[], cum=[]; let c=0;                  // one slice per filtered month = Σ selected periods
   for(const ym of yms){ const b=mb[ym]; let v=0,has=false;
     for(const p of periods){ if(b[p]!=null){ v+=b[p]; has=true; } }
@@ -770,7 +816,7 @@ function drawEvent(){
   }
   traces.push({type:"scatter",mode:"lines",name:"median (all yrs)",x:offs,y:ref.map(a=>median(a)),line:{color:"#ffd633",width:3.5},hovertemplate:"median day %{x}: %{y:+.2f} bp<extra></extra>"});
   traces.push({type:"scatter",mode:"lines",name:"mean (all yrs)",x:offs,y:ref.map(a=>mean(a)),line:{color:"#e6edf3",width:2.5,dash:"dot"},hovertemplate:"mean day %{x}: %{y:+.2f} bp<extra></extra>"});
-  const mname=MNAME[S.smetric]+(S.smetric==="be"?" (β="+S.beta+"%)":"")+dirS();
+  const mname=mlabel();
   Plotly.react("evchart",traces,{
     paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:56,r:20,t:34,b:42},
     title:{text:S.tenor+" — "+mname+" around the auction (event-aligned; day 0 = auction)",font:{size:13}},
@@ -809,7 +855,7 @@ function downloadCSV(){
   for(let i=0;i<s.dates.length;i++) csv+=[s.dates[i],s.rT[i],s.rU[i],s.rBE[i].toFixed(4),s.lBE[i].toFixed(4),s.sBE[i].toFixed(4)].join(",")+"\n";
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-  a.download="breakeven_"+S.tenor+"_xT"+S.xT+"_xU"+S.xU+".csv"; a.click();
+  a.download="breakeven_"+S.tenor+"_b"+S.beta+(gasOn()?"_gas"+S.gwin:"")+"_xT"+S.xT+"_xU"+S.xU+".csv"; a.click();
 }
 // ---- wire controls ----
 function seg(id,key,after){ $(id).querySelectorAll("button").forEach(b=>b.onclick=()=>{
@@ -825,7 +871,7 @@ tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.
   S.tenor=S.tenors[0];                                                                      // primary = first selected
   syncTenorBtns(); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
-seg("issue","issue"); seg("calend","calend"); seg("pos","pos");
+seg("issue","issue"); seg("calend","calend"); seg("pos","pos"); seg("gas","gas"); seg("gwin","gwin");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
   S.periods=[...$("speriod").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
 $("swin").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{

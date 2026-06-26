@@ -660,11 +660,17 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
     aucs = tips_auction_calendar()
     isnew = tips_auction_isnew()
     rows, early_hits = [], []
+    try:                                          # daily gas $/contract (for the bucketed gas hedge)
+        import energy
+        gas_all = energy.load_energy()["usd_per_contract"]
+    except Exception:
+        gas_all = None
     for ten in tenors:
         try:
             r = load_returns(ten)
         except Exception:
             continue
+        r = r.assign(gas_usd=(gas_all.reindex(r.index).fillna(0.0) if gas_all is not None else 0.0))
         idx = r.index
         for (y, m), sub in r.groupby([idx.year, idx.month]):
             anc = month_anchors(int(y), int(m), cal, aucs.get((int(y), int(m))))
@@ -680,15 +686,16 @@ def seasonal_table(tenors=("5y", "10y", "30y"), save=True):
                 mask = per == p
                 td = int(mask.sum())
                 if td == 0:
-                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, np.nan, np.nan, 0, bool(clamped), nw))
+                    rows.append((int(y), int(m), p, ten, np.nan, np.nan, np.nan, np.nan, np.nan, 0, bool(clamped), nw))
                 else:
                     rows.append((int(y), int(m), p, ten, float(sub["r_TIPS_bp"].to_numpy()[mask].sum()),
                                  float(sub["r_UST_bp"].to_numpy()[mask].sum()),
                                  float(sub["s_TIPS"].to_numpy()[mask].sum()),   # Σ repo-half-spread sensitivity in the
                                  float(sub["s_UST"].to_numpy()[mask].sum()),    # bucket -> seasonal views apply x_TIPS/x_UST
+                                 float(sub["gas_usd"].to_numpy()[mask].sum()),  # Σ gas $/contract in bucket -> gas hedge
                                  td, bool(clamped), nw))
     df = pd.DataFrame(rows, columns=["year", "month", "period", "tenor",
-                                     "tips_pnl", "ust_pnl", "tips_slip", "ust_slip",
+                                     "tips_pnl", "ust_pnl", "tips_slip", "ust_slip", "gas_pnl",
                                      "trading_days", "clamped", "new_issue"])
     if early_hits:
         print(f"  [seasonal] early-auction clamp fired {len(early_hits)}x (front-of-month auctions, "
