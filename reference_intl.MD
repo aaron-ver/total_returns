@@ -126,7 +126,7 @@ They are **catalogued** (ISIN, coupon, maturity, the relevant RPI base months) s
 The street keeps a list of the nominal bond used as each linker's breakeven comparator, so we do
 **not** pick the hedge — we look it up. `breakeven_intl.py` reads `breakeven_map.csv`
 (`real_isin, nominal_isin, beta, note`); the desk's file plugs straight in. Mechanics:
-- `r_BE = r_real − beta·r_nominal`, both DV01-normalized (100k DV01/leg) — `beta=1.0` = equal-DV01 plain breakeven (my default when the map omits beta; document any other choice in the `note`).
+- `r_BE = r_linker − beta·r_nominal`, both DV01-normalized (100k DV01/leg) — `beta=1.0` = equal-DV01 plain breakeven (my default when the map omits beta; document any other choice in the `note`). Export columns use `linker_`/`nominal_` leg prefixes (NOT real-vs-cash value space); par notional is held constant within the month and inflation accretes through `linker_IR` in `V_linker`, not the notional.
 - The nominal leg is `engine_intl.nominal_series` (index OFF → IR=1), financed in the **nominal bond's own-country GC** (auto-detected from its ISIN/COUNTRY). So own-country pairs net financing ≈0; a Bund/swap-style cross-country hedge carries the **BTP–Bund / Bono–Bund** GC+sovereign basis as `net_fin_bp` — visible, not hidden. The street list decides which; the engine handles either.
 - DV01 from `pricing.py` for both legs on one basis (no BBG risk). Beta-adjust by setting `beta<1` per row.
 

@@ -3,26 +3,27 @@ Auction & syndication calendar for European/UK linkers (reference_intl.MD §9 �
 headline "gather auction/syndication dates and sizes" ask).
 
 There is NO single public European auction API (the US used TreasuryDirect). The desk instruction
-is "pull with bbg", so this collects in two layers and unions them:
+is "pull with bbg", so this collects in three layers and unions them (distinguishing NEW vs REOPENING):
 
-  1. BLOOMBERG, bond-level (reliable via refdata): per ISIN the ORIGINAL issue date, first-settle
-     date, total AMOUNT ISSUED, issue price, and the distribution method (auction vs syndication)
-     where Bloomberg carries it. This is what Bloomberg's ReferenceDataRequest exposes cleanly —
-     it does NOT expose a clean per-TAP (reopening-by-reopening) history through refdata.
+  1. BLOOMBERG static, NEW issues (from_static): per ISIN the ORIGINAL issue date, first-settle date,
+     amount issued, issue price. The definitive new-issue event per bond.
 
-  2. DMO RESULTS FILES, tap-level (the granular calendar): each debt office publishes downloadable
-     auction/syndication results (date, ISIN, nominal allotted, price/yield, reopening). Drop the
-     normalized CSVs in cache_intl/auctions_raw/<country>.csv and this folds them in. Sources in
-     DMO_SOURCES below. Bloomberg's {AUCN}/{NIM} screens are the manual cross-check.
+  2. BLOOMBERG AMT_OUTSTANDING history, REOPENINGS (pull_reopenings): every positive step-up in a
+     bond's daily amount-outstanding series is a tap/reopening (date + size). Bloomberg-native, no
+     DMO files needed. (Falls back to layer 3 if the field isn't served historically.)
 
-Output: cache_intl/auctions.parquet — one row per (isin, event_date), columns:
-  isin, market, country, event_date, settle_date, event_type(auction|syndication|tap|issue),
-  amount, price, yield, reopening, source(bbg|dmo).
+  3. DMO RESULTS FILES, tap-level (load_dmo): each debt office publishes downloadable auction results
+     (date, ISIN, nominal allotted, price/yield, reopening). Drop normalized CSVs in
+     cache_intl/auctions_raw/<country>.csv. Sources in DMO_SOURCES below; manual cross-check.
+
+Output: cache_intl/auctions.parquet — one row per event, columns:
+  isin, market, country, event_date, settle_date, event_type(issue|reopening|auction|tap),
+  amount, price, yield, reopening(bool), source(bbg|bbg_amt|dmo).
 
 Usage:
-  python auctions_intl.py bbg         # build the bond-level table from cached Bloomberg static
+  python auctions_intl.py reopenings  # pull AMT_OUTSTANDING history -> derive taps -> reopenings.parquet
+  python auctions_intl.py build       # union new issues + reopenings (+DMO) -> cache_intl/auctions.parquet
   python auctions_intl.py dmo         # fold in any cache_intl/auctions_raw/<country>.csv files
-  python auctions_intl.py build       # union both -> cache_intl/auctions.parquet
   python auctions_intl.py sources     # print where to download each DMO's results files
 """
 from __future__ import annotations
@@ -34,6 +35,18 @@ import linkers
 CACHE = linkers.CACHE
 RAW = os.path.join(CACHE, "auctions_raw")
 OUT = os.path.join(CACHE, "auctions.parquet")
+REOPEN_PARQUET = os.path.join(CACHE, "reopenings.parquet")
+OUTSTANDING_FIELD = "AMT_OUTSTANDING"
+CANON = ["isin", "market", "country", "event_date", "settle_date", "event_type",
+         "amount", "price", "yield", "reopening", "source"]
+
+
+def _canon(df):
+    df = df.copy()
+    for c in CANON:
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df[CANON]
 
 # Where to download each debt office's auction/syndication results (the tap-level calendar).
 DMO_SOURCES = {
@@ -96,6 +109,53 @@ def pull_method(write_back=True):
     return out
 
 
+def pull_reopenings(eps_bn=0.05, include_deferred=False):
+    """Derive REOPENING/tap events (date + size) from each linker's AMT_OUTSTANDING DAILY HISTORY:
+    every positive step-up in the outstanding amount is a tap. Bloomberg-native — no DMO files
+    needed. The original NEW issue is anchored separately (from_static); here we capture only the
+    post-issue step-ups. Caches cache_intl/reopenings.parquet. Needs the Terminal.
+
+    If AMT_OUTSTANDING isn't served historically (series comes back flat) the bond is skipped and a
+    warning is printed — then fall back to the DMO auction-results files (auctions_intl.py sources)."""
+    import bbg
+    import data_layer_intl as dl
+    u = linkers.load_universe(include_deferred=include_deferred)
+    ev, flat, served = [], 0, 0
+    bbg.open_session()
+    try:
+        for n, i in enumerate(u["isin"], 1):
+            sec = f"{i} {linkers.BBG_SUFFIX}"
+            try:
+                rows = dl._history_one(sec, [OUTSTANDING_FIELD], dl.DAILY_START, dl.TODAY)
+            except Exception as e:
+                print(f"  [{n}/{len(u)}] {i} AMT_OUTSTANDING FAILED ({e})", flush=True); continue
+            s = pd.DataFrame(rows)
+            if s.empty or OUTSTANDING_FIELD not in s.columns:
+                continue
+            s["date"] = pd.to_datetime(s["date"])
+            s = s.set_index("date")[OUTSTANDING_FIELD].dropna().sort_index()
+            if s.nunique() <= 1:                          # flat -> history not served, can't detect taps
+                flat += 1; continue
+            served += 1
+            steps = s.diff()
+            taps = steps[steps > eps_bn * 1e9]            # positive step-ups = reopenings (ignore buybacks)
+            for dt, amt in taps.items():
+                ev.append({"isin": i, "event_date": pd.Timestamp(dt), "event_type": "reopening",
+                           "amount": float(amt), "reopening": True, "source": "bbg_amt"})
+            print(f"  [{n}/{len(u)}] {i} -> {len(taps)} taps", flush=True)
+    finally:
+        bbg.close_session()
+    out = pd.DataFrame(ev)
+    os.makedirs(CACHE, exist_ok=True)
+    out.to_parquet(REOPEN_PARQUET)
+    print(f"  wrote {REOPEN_PARQUET}: {len(out)} reopening events across {served} bonds "
+          f"({flat} had flat/unserved AMT_OUTSTANDING history)")
+    if served == 0:
+        print("  WARN: AMT_OUTSTANDING not served historically -> use the DMO auction-results files "
+              "instead (python auctions_intl.py sources).")
+    return out
+
+
 def load_dmo():
     """Fold in any normalized DMO results CSVs in cache_intl/auctions_raw/<country>.csv (tap-level)."""
     os.makedirs(RAW, exist_ok=True)
@@ -117,18 +177,33 @@ def load_dmo():
 
 
 def build():
+    """Union the issuance calendar: NEW issues (from_static, bbg) + REOPENINGS (reopenings.parquet
+    from pull_reopenings, bbg_amt) + any DMO tap files -> cache_intl/auctions.parquet."""
     os.makedirs(CACHE, exist_ok=True)
-    bbg_rows = from_static()
+    parts = []
+    new_rows = from_static()
+    if not new_rows.empty:
+        parts.append(_canon(new_rows))
+    if os.path.exists(REOPEN_PARQUET):
+        rp = pd.read_parquet(REOPEN_PARQUET)
+        if not rp.empty:
+            u = linkers.load_universe(include_deferred=True).set_index("isin")
+            rp["market"] = rp["isin"].map(u["market"]); rp["country"] = rp["isin"].map(u["country"])
+            parts.append(_canon(rp))
     dmo_rows = load_dmo()
-    parts = [d for d in (bbg_rows, dmo_rows) if not d.empty]
+    if not dmo_rows.empty:
+        parts.append(_canon(dmo_rows))
     if not parts:
-        print("  no auction data — run linkers.enrich() (for bbg rows) and/or drop DMO CSVs in cache_intl/auctions_raw/")
+        print("  no auction data — run linkers.enrich() (new issues) + auctions_intl.pull_reopenings() (taps)")
         return pd.DataFrame()
     allrows = pd.concat(parts, ignore_index=True).sort_values(["country", "isin", "event_date"])
     allrows.to_parquet(OUT)
-    print(f"  wrote {OUT}: {len(allrows)} events "
-          f"({(allrows.source == 'bbg').sum()} bbg bond-level, {(allrows.source == 'dmo').sum()} dmo tap-level)")
-    print(allrows.groupby(["country", "event_type"]).size().to_string())
+    nnew = int((allrows["event_type"] == "issue").sum())
+    nreopen = int((allrows["reopening"] == True).sum())
+    print(f"  wrote {OUT}: {len(allrows)} events — {nnew} new issues, {nreopen} reopenings "
+          f"(sources: {dict(allrows['source'].value_counts())})")
+    if nreopen == 0:
+        print("  (no reopenings yet — run `python auctions_intl.py reopenings` to pull them from AMT_OUTSTANDING)")
     return allrows
 
 
@@ -144,6 +219,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
     if cmd == "bbg":
         print(from_static().to_string())
+    elif cmd == "reopenings":
+        pull_reopenings()
     elif cmd == "dmo":
         d = load_dmo()
         print(d.to_string() if not d.empty else "  no DMO CSVs in cache_intl/auctions_raw/")

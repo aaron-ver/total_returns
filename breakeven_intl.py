@@ -32,9 +32,11 @@ CACHE = linkers.CACHE
 MAP_CSV = os.path.join(HERE, "breakeven_map.csv")
 EXPORTS = os.path.join(HERE, "exports")
 
-SHEET_COLS = ["real_isin", "nominal_isin", "beta", "country",
-              "r_real_bp", "r_nom_bp", "r_BE_bp", "cum_real_bp", "cum_nom_bp", "cum_BE_bp",
-              "real_yield", "nom_yield", "net_fin_bp", "days"]
+# Column naming: the per-day output uses leg prefixes linker_ (the inflation-LINKED bond) and
+# nominal_ (the nominal hedge bond) -- they are the two LEGS, NOT real-vs-cash value space. Within
+# the linker leg, linker_clean/dirty/yield are quoted in REAL terms and V_linker = linker_dirty *
+# linker_IR is the inflation-adjusted CASH value (where accretion enters). The par notional is held
+# constant within the month; inflation flows through linker_IR in V, not through the notional.
 
 
 # Desk "street" linker reports (monthly). Each 'Reports' sheet has, per linker: ISIN (real bond),
@@ -147,55 +149,19 @@ def _real_leg(real_isin):
         return eng.bond_series(real_isin, row.iloc[0]["market"]) if not row.empty else pd.DataFrame()
 
 
-def build_be(real_isin, nominal_isin, beta=1.0, save=True):
-    """Breakeven daily/cumulative return for one (linker, nominal) pair. r_BE = r_real - beta*r_nom,
-    both DV01-normalized bp. Returns a frame indexed by the common trading days, or empty."""
-    real = _real_leg(real_isin)
-    country = _nominal_country(nominal_isin)
-    if real.empty or country is None:
-        return pd.DataFrame()
-    nom = eng.nominal_series(nominal_isin, country)
-    if nom.empty:
-        return pd.DataFrame()
-    idx = real.index.intersection(nom.index)               # common trading days
-    if len(idx) < 2:
-        return pd.DataFrame()
-    rr, nn = real.loc[idx], nom.loc[idx]
-    out = pd.DataFrame(index=idx)
-    out.index.name = "date"
-    out["real_isin"] = real_isin
-    out["nominal_isin"] = nominal_isin
-    out["beta"] = beta
-    out["country"] = country
-    out["r_real_bp"] = rr["bp"]
-    out["r_nom_bp"] = nn["bp"]
-    out["r_BE_bp"] = rr["bp"] - beta * nn["bp"]
-    out["cum_real_bp"] = out["r_real_bp"].cumsum()
-    out["cum_nom_bp"] = out["r_nom_bp"].cumsum()
-    out["cum_BE_bp"] = out["r_BE_bp"].cumsum()
-    out["real_yield"] = rr["yield"]
-    out["nom_yield"] = nn["yield"]
-    out["net_fin_bp"] = rr["fin_bp"] - beta * nn["fin_bp"] # ≈0 same-ccy GC; = GC differential cross-country
-    out["days"] = rr["days"]
-    if save and not out.empty:
-        os.makedirs(os.path.join(CACHE, "breakeven"), exist_ok=True)
-        out.to_parquet(os.path.join(CACHE, "breakeven", f"{real_isin}.parquet"))
-    return out
-
-
 # --- comprehensive per-pair dump (US-TIPS-style: both legs' full chain side by side) ----------
 FULL_COLS = [
     "settlement_date", "d", "gc_repo",
-    # --- REAL (linker) leg ---
-    "real_isin", "real_clean", "real_yield", "real_accrued", "real_IR", "real_IR_bbg",
-    "real_dirty_real", "V_real", "V_real_prev", "real_DV01", "real_notional",
-    "real_dV", "real_coupon", "real_financing", "real_gross_bp", "real_fin_bp", "r_real_bp",
-    # --- NOMINAL hedge leg ---
-    "nom_isin", "nom_clean", "nom_yield", "nom_accrued", "nom_dirty", "V_nom", "V_nom_prev",
-    "nom_DV01", "nom_notional", "nom_dV", "nom_coupon", "nom_financing", "nom_gross_bp",
-    "nom_fin_bp", "r_nom_bp",
+    # --- LINKER leg (the inflation-linked bond; clean/dirty/yield quoted REAL) ---
+    "linker_isin", "linker_clean", "linker_yield", "linker_accrued", "linker_IR", "linker_IR_bbg",
+    "linker_dirty", "V_linker", "V_linker_prev", "linker_notional", "linker_DV01",
+    "linker_dV", "linker_coupon", "linker_financing", "linker_gross_bp", "linker_fin_bp", "r_linker_bp",
+    # --- NOMINAL hedge leg (the nominal govt bond; IR=1) ---
+    "nominal_isin", "nominal_clean", "nominal_yield", "nominal_accrued", "nominal_dirty",
+    "V_nominal", "V_nominal_prev", "nominal_notional", "nominal_DV01",
+    "nominal_dV", "nominal_coupon", "nominal_financing", "nominal_gross_bp", "nominal_fin_bp", "r_nominal_bp",
     # --- breakeven ---
-    "beta", "net_fin_bp", "r_BE_bp", "cum_real_bp", "cum_nom_bp", "cum_BE_bp",
+    "beta", "net_fin_bp", "r_BE_bp", "cum_linker_bp", "cum_nominal_bp", "cum_BE_bp",
     # --- flags ---
     "is_coupon_day", "is_weekend_or_holiday_step",
 ]
@@ -205,37 +171,42 @@ README_FULL_ROWS = [
     ("settlement_date", "T+1 (gilt) / T+2 (euro) settle on the local calendar; V/accrued/IR valued here"),
     ("d", "settlement span = settle(t)-settle(t-1) in calendar days; drives accrual (via dV) AND repo"),
     ("gc_repo", "local GC financing rate that day (%, €STR euro / SONIA gilt; RFR per-country once filled). Same for both legs (own-country pair)."),
-    ("--- REAL (linker) leg ---", ""),
-    ("real_isin", "the inflation-linked bond"),
-    ("real_clean", "quoted clean REAL price per 100 (Bloomberg PX_CLEAN_MID)"),
-    ("real_yield", "real yield to maturity"),
-    ("real_accrued", "accrued REAL coupon per 100 = (C/freq)*(1-w), act/act ICMA"),
-    ("real_IR", "index ratio = DRI(settle)/DRI(dated), rules-based from the reference index (reference_intl §3)"),
-    ("real_IR_bbg", "Bloomberg's own INDEX_RATIO (cross-check; engine drives off real_IR). Blank before ircheck window."),
-    ("real_dirty_real", "real_clean + real_accrued"),
-    ("V_real", "cash value per 100 = real_dirty_real * real_IR (the inflation-uplifted settlement amount)"),
-    ("V_real_prev", "prior-settle V_real (the financing base)"),
-    ("real_DV01", "sizing DV01 per 100 face, fixed at month start = the bp denominator (our pricing.py calc, NOT BBG)"),
-    ("real_notional", "face giving 100k DV01 = 1e7/real_DV01 (held all month)"),
-    ("real_dV", "V_real - V_real_prev (same bond; weekend accretion lands on the pre-weekend day)"),
-    ("real_coupon", "coupon cash booked when a pay date falls in the settle span = (C/freq)*IR"),
-    ("real_financing", "d/360 * gc_repo/100 * V_real_prev (repo on cash carried in)"),
-    ("real_gross_bp", "(real_dV + real_coupon)/real_DV01 — price+coupon return before financing"),
-    ("real_fin_bp", "real_financing/real_DV01 — financing drag (bp)"),
-    ("r_real_bp", "linker net financed return (bp) = real_gross_bp - real_fin_bp"),
-    ("--- NOMINAL hedge leg (short) ---", ""),
-    ("nom_isin", "nominal govt bond shorted as the rates hedge (the street comparator)"),
-    ("nom_clean / nom_yield / nom_accrued", "clean price, yield, accrued (no index ratio; IR=1)"),
-    ("nom_dirty", "nom_clean + nom_accrued"),
-    ("V_nom / V_nom_prev", "cash value = nom_dirty (IR=1) and its prior-settle base"),
-    ("nom_DV01 / nom_notional", "sizing DV01 per 100 (bp denominator) and the 100k-DV01 face"),
-    ("nom_dV / nom_coupon / nom_financing", "day ΔV, coupon cash, repo financing (own-country GC)"),
-    ("nom_gross_bp / nom_fin_bp / r_nom_bp", "gross, financing drag, net financed return (bp)"),
+    ("NAMING", "linker_ / nominal_ prefixes are the two LEGS (inflation-LINKED bond vs the NOMINAL "
+               "hedge bond), NOT real-vs-cash value space. Within the linker leg, clean/dirty/yield "
+               "are quoted REAL; the inflation-adjusted CASH value is V_linker = linker_dirty*linker_IR."),
+    ("--- LINKER leg (long; the inflation-linked bond) ---", ""),
+    ("linker_isin", "the inflation-linked bond"),
+    ("linker_clean", "quoted clean REAL price per 100 (Bloomberg PX_CLEAN_MID)"),
+    ("linker_yield", "real yield to maturity"),
+    ("linker_accrued", "accrued REAL coupon per 100 = (C/freq)*(1-w), act/act ICMA"),
+    ("linker_IR", "index ratio = DRI(settle)/DRI(dated), rules-based from the reference index (reference_intl §3)"),
+    ("linker_IR_bbg", "Bloomberg's own INDEX_RATIO (cross-check; engine drives off linker_IR). Blank before ircheck window."),
+    ("linker_dirty", "linker_clean + linker_accrued (REAL dirty price)"),
+    ("V_linker", "CASH value per 100 = linker_dirty * linker_IR — the inflation-uplifted settlement amount; "
+                 "this is where inflation enters (accretion = the rise in linker_IR), NOT the notional"),
+    ("V_linker_prev", "prior-settle V_linker (the financing base)"),
+    ("linker_notional", "PAR/face giving 100k DV01 = 1e7/linker_DV01 — set at month start and HELD CONSTANT all "
+                        "month (par face is constant; inflation accretes through linker_IR in V_linker, not here)"),
+    ("linker_DV01", "sizing cash DV01 per 100 face (= real DV01 * IR), fixed at month start = the bp denominator (our pricing.py calc)"),
+    ("linker_dV", "V_linker - V_linker_prev (same bond; captures price move + inflation accretion; weekend accretion lands pre-weekend)"),
+    ("linker_coupon", "coupon cash booked when a pay date falls in the settle span = (C/freq)*IR"),
+    ("linker_financing", "d/360 * gc_repo/100 * V_linker_prev (repo on the inflation-uplifted cash carried in)"),
+    ("linker_gross_bp", "(linker_dV + linker_coupon)/linker_DV01 — price+coupon+accretion return before financing"),
+    ("linker_fin_bp", "linker_financing/linker_DV01 — financing drag (bp)"),
+    ("r_linker_bp", "linker net financed return (bp) = linker_gross_bp - linker_fin_bp"),
+    ("--- NOMINAL hedge leg (short; the nominal govt bond) ---", ""),
+    ("nominal_isin", "nominal govt bond shorted as the rates hedge (the street comparator)"),
+    ("nominal_clean / nominal_yield / nominal_accrued", "clean price, NOMINAL yield, accrued (no index ratio; IR=1)"),
+    ("nominal_dirty", "nominal_clean + nominal_accrued"),
+    ("V_nominal / V_nominal_prev", "cash value = nominal_dirty (IR=1) and its prior-settle base"),
+    ("nominal_notional / nominal_DV01", "PAR face giving 100k DV01 (held constant the month) and the sizing DV01 (bp denominator)"),
+    ("nominal_dV / nominal_coupon / nominal_financing", "day ΔV, coupon cash, repo financing (own-country GC)"),
+    ("nominal_gross_bp / nominal_fin_bp / r_nominal_bp", "gross, financing drag, net financed return (bp)"),
     ("--- BREAKEVEN ---", ""),
     ("beta", "DV01 weight on the nominal leg (1.0 = equal-DV01 plain breakeven; from breakeven_map.csv)"),
-    ("net_fin_bp", "real_fin_bp - beta*nom_fin_bp (long pays / short earns); ≈0 for an own-country pair at GC mid"),
-    ("r_BE_bp", "breakeven daily return = r_real_bp - beta*r_nom_bp"),
-    ("cum_real_bp / cum_nom_bp / cum_BE_bp", "running LINEAR sums of the daily bp (not compounded)"),
+    ("net_fin_bp", "linker_fin_bp - beta*nominal_fin_bp (long pays / short earns); ≈0 for an own-country pair at GC mid"),
+    ("r_BE_bp", "breakeven daily return = r_linker_bp - beta*r_nominal_bp"),
+    ("cum_linker_bp / cum_nominal_bp / cum_BE_bp", "running LINEAR sums of the daily bp (not compounded)"),
     ("is_coupon_day", "a coupon paid on either leg that day"),
     ("is_weekend_or_holiday_step", "d > 1 (the step spans a weekend/holiday)"),
     ("NOTE financing", "GC mid, no specialness, no repo bid/offer (same convention as the US build)."),
@@ -267,25 +238,25 @@ def build_be_full(real_isin, nominal_isin, beta=1.0, save=True):
     r, n = real.loc[idx], nom.loc[idx]
     o = pd.DataFrame(index=idx); o.index.name = "date"
     o["settlement_date"] = r["settle"]; o["d"] = r["days"]; o["gc_repo"] = r["gc"]
-    # real leg
-    o["real_isin"] = real_isin; o["real_clean"] = r["clean"]; o["real_yield"] = r["yield"]
-    o["real_accrued"] = r["accrued"]; o["real_IR"] = r["IR"]; o["real_IR_bbg"] = r["IR_bbg"]
-    o["real_dirty_real"] = r["dirty_real"]; o["V_real"] = r["V"]; o["V_real_prev"] = r["V_prev"]
-    o["real_DV01"] = r["denom"]; o["real_notional"] = r["notional"]; o["real_dV"] = r["dV"]
-    o["real_coupon"] = r["coupon"]; o["real_financing"] = r["financing"]
-    o["real_gross_bp"] = r["gross_bp"]; o["real_fin_bp"] = r["fin_bp"]; o["r_real_bp"] = r["bp"]
-    # nominal leg
-    o["nom_isin"] = nominal_isin; o["nom_clean"] = n["clean"]; o["nom_yield"] = n["yield"]
-    o["nom_accrued"] = n["accrued"]; o["nom_dirty"] = n["dirty_real"]; o["V_nom"] = n["V"]
-    o["V_nom_prev"] = n["V_prev"]; o["nom_DV01"] = n["denom"]; o["nom_notional"] = n["notional"]
-    o["nom_dV"] = n["dV"]; o["nom_coupon"] = n["coupon"]; o["nom_financing"] = n["financing"]
-    o["nom_gross_bp"] = n["gross_bp"]; o["nom_fin_bp"] = n["fin_bp"]; o["r_nom_bp"] = n["bp"]
+    # LINKER leg (inflation-linked bond): clean/dirty/yield are REAL; V_linker = linker_dirty * linker_IR (cash)
+    o["linker_isin"] = real_isin; o["linker_clean"] = r["clean"]; o["linker_yield"] = r["yield"]
+    o["linker_accrued"] = r["accrued"]; o["linker_IR"] = r["IR"]; o["linker_IR_bbg"] = r["IR_bbg"]
+    o["linker_dirty"] = r["dirty_real"]; o["V_linker"] = r["V"]; o["V_linker_prev"] = r["V_prev"]
+    o["linker_notional"] = r["notional"]; o["linker_DV01"] = r["denom"]; o["linker_dV"] = r["dV"]
+    o["linker_coupon"] = r["coupon"]; o["linker_financing"] = r["financing"]
+    o["linker_gross_bp"] = r["gross_bp"]; o["linker_fin_bp"] = r["fin_bp"]; o["r_linker_bp"] = r["bp"]
+    # NOMINAL hedge leg (IR=1): V_nominal = nominal_dirty
+    o["nominal_isin"] = nominal_isin; o["nominal_clean"] = n["clean"]; o["nominal_yield"] = n["yield"]
+    o["nominal_accrued"] = n["accrued"]; o["nominal_dirty"] = n["dirty_real"]; o["V_nominal"] = n["V"]
+    o["V_nominal_prev"] = n["V_prev"]; o["nominal_notional"] = n["notional"]; o["nominal_DV01"] = n["denom"]
+    o["nominal_dV"] = n["dV"]; o["nominal_coupon"] = n["coupon"]; o["nominal_financing"] = n["financing"]
+    o["nominal_gross_bp"] = n["gross_bp"]; o["nominal_fin_bp"] = n["fin_bp"]; o["r_nominal_bp"] = n["bp"]
     # breakeven
     o["beta"] = beta
     o["net_fin_bp"] = r["fin_bp"] - beta * n["fin_bp"]
     o["r_BE_bp"] = r["bp"] - beta * n["bp"]
-    o["cum_real_bp"] = o["r_real_bp"].cumsum()
-    o["cum_nom_bp"] = o["r_nom_bp"].cumsum()
+    o["cum_linker_bp"] = o["r_linker_bp"].cumsum()
+    o["cum_nominal_bp"] = o["r_nominal_bp"].cumsum()
     o["cum_BE_bp"] = o["r_BE_bp"].cumsum()
     o["is_coupon_day"] = (r["coupon"] != 0) | (n["coupon"] != 0)
     o["is_weekend_or_holiday_step"] = o["d"] > 1
