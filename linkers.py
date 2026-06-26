@@ -52,8 +52,9 @@ REF_INDEX = {
 # Alternative single secured euro GC: STOXX GC Pooling EUR ON = "GCPION Index" (set a market's
 # repo to "gcpool" to use it). See reference_intl §6 for the menu.
 FINANCING = {
-    "estr_gc":  dict(ticker="ESTRON Index",  ccy="EUR", desc="€STR unsecured O/N — euro fallback (cached)"),
-    "sonia_gc": dict(ticker="SONIO/N Index", ccy="GBP", desc="SONIA O/N — gilt GC proxy (cached)"),
+    "estr_gc":  dict(ticker="ESTRON Index",  ccy="EUR", desc="€STR unsecured O/N — euro fallback (from Oct-2019)"),
+    "eonia":    dict(ticker="EONIA Index",   ccy="EUR", desc="EONIA O/N — pre-Oct-2019 euro extension (≈€STR+8.5bp)"),
+    "sonia_gc": dict(ticker="SONIO/N Index", ccy="GBP", desc="SONIA O/N — gilt GC proxy (back to ~1997)"),
     "gcpool":   dict(ticker="GCPION Index",  ccy="EUR", desc="STOXX GC Pooling EUR ON — secured euro GC (single rate)"),
     "rfr_de":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Germany — core GC (fill ticker from REPF)"),
     "rfr_fr":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate France — core GC (fill ticker from REPF)"),

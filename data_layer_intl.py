@@ -144,20 +144,35 @@ def ref_index_series(index_key):
     return m[index_key].dropna()
 
 
+def _euro_gc_extended():
+    """Continuous euro GC O/N back to 1999: €STR (from Oct-2019) spliced with EONIA−8.5bp before
+    that (EONIA was recalibrated to €STR+8.5bp in 2019), so financing isn't zero pre-€STR."""
+    m = _macro()
+    estr = m["estr_gc"].dropna() if "estr_gc" in m.columns else pd.Series(dtype=float)
+    eonia = (m["eonia"].dropna() - 0.085) if "eonia" in m.columns else pd.Series(dtype=float)
+    return (estr.combine_first(eonia) if not estr.empty else eonia).sort_index()
+
+
+def _gbp_gc_extended():
+    m = _macro()
+    return m["sonia_gc"].dropna().sort_index() if "sonia_gc" in m.columns else pd.Series(dtype=float)
+
+
 _FALLBACK_LOGGED = set()
 def financing_series(repo_key):
-    """Daily GC financing rate (percent), ffilled. If the requested curve isn't in the macro cache
-    (e.g. an RFR ticker not yet filled), fall back to the cached €STR/SONIA single rate by currency
-    so the engine still runs -- logged once."""
+    """Daily GC financing rate (percent), ffilled and gap-filled to cover full bond history. Uses
+    the requested per-country curve where present (e.g. RFR once filled), with the currency's
+    extended GC base (euro = €STR+EONIA; gbp = SONIA) filling any holes -- including the long
+    pre-2019 stretch where €STR doesn't exist."""
     m = _macro()
-    s = m[repo_key].dropna() if repo_key in m.columns else pd.Series(dtype=float)
-    if s.empty:
-        meta = linkers.FINANCING.get(repo_key, {})
-        fb = linkers.GBP_FALLBACK_REPO if meta.get("ccy") == "GBP" else linkers.EUR_FALLBACK_REPO
-        if repo_key not in _FALLBACK_LOGGED:
-            print(f"  [financing] {repo_key} unavailable -> falling back to {fb}")
-            _FALLBACK_LOGGED.add(repo_key)
-        s = m[fb].dropna() if fb in m.columns else pd.Series(dtype=float)
+    meta = linkers.FINANCING.get(repo_key, {})
+    base = _gbp_gc_extended() if meta.get("ccy") == "GBP" else _euro_gc_extended()
+    primary = m[repo_key].dropna() if repo_key in m.columns else pd.Series(dtype=float)
+    if primary.empty and repo_key not in _FALLBACK_LOGGED:
+        print(f"  [financing] {repo_key} unavailable -> using extended "
+              f"{'SONIA' if meta.get('ccy') == 'GBP' else '€STR/EONIA'} GC")
+        _FALLBACK_LOGGED.add(repo_key)
+    s = primary.combine_first(base) if not primary.empty else base
     return s.sort_index().ffill()
 
 
