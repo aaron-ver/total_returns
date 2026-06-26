@@ -118,6 +118,8 @@ def pull_macro():
         frames.append(s.rename(key).to_frame())
         print(f"  {key:12s} {meta['ticker']:16s} n={len(s)} {str(s.index.min())[:7]}->{str(s.index.max())[:7]}")
     for key, meta in linkers.FINANCING.items():
+        if not meta.get("ticker"):                       # RFR tickers left None until filled from REPF
+            print(f"  {key:12s} (no ticker yet — fill from REPF; falls back to €STR/SONIA)"); continue
         h = bbg.history(meta["ticker"], ["PX_LAST"], START, TODAY).get(meta["ticker"], [])
         if not h:
             print(f"  WARN no data for {key} ({meta['ticker']})"); continue
@@ -142,9 +144,21 @@ def ref_index_series(index_key):
     return m[index_key].dropna()
 
 
+_FALLBACK_LOGGED = set()
 def financing_series(repo_key):
-    """Daily GC financing rate (percent) for a funding curve, ffilled."""
-    return _macro()[repo_key].dropna().sort_index().ffill()
+    """Daily GC financing rate (percent), ffilled. If the requested curve isn't in the macro cache
+    (e.g. an RFR ticker not yet filled), fall back to the cached €STR/SONIA single rate by currency
+    so the engine still runs -- logged once."""
+    m = _macro()
+    s = m[repo_key].dropna() if repo_key in m.columns else pd.Series(dtype=float)
+    if s.empty:
+        meta = linkers.FINANCING.get(repo_key, {})
+        fb = linkers.GBP_FALLBACK_REPO if meta.get("ccy") == "GBP" else linkers.EUR_FALLBACK_REPO
+        if repo_key not in _FALLBACK_LOGGED:
+            print(f"  [financing] {repo_key} unavailable -> falling back to {fb}")
+            _FALLBACK_LOGGED.add(repo_key)
+        s = m[fb].dropna() if fb in m.columns else pd.Series(dtype=float)
+    return s.sort_index().ffill()
 
 
 # --------------------------------------------------------------------------- index ratio (§3-§4)
@@ -201,12 +215,39 @@ def _save_daily(isin, rows):
     return len(df)
 
 
+def _pull_daily(isins, pause=0.2):
+    """Per-bond chunked daily pull (assumes a bbg session is open). One bond at a time, each in small
+    date windows; a bond that fails is logged and SKIPPED. Returns the list of failed ISINs."""
+    failed = []
+    for n, i in enumerate(isins, 1):
+        sec = f"{i} {linkers.BBG_SUFFIX}"
+        try:
+            nr = _save_daily(i, _history_one(sec, DAILY_FIELDS, DAILY_START, TODAY))
+            print(f"  [{n}/{len(isins)}] {i} -> {nr} rows", flush=True)
+        except Exception as e:
+            failed.append(i)
+            print(f"  [{n}/{len(isins)}] {i} FAILED ({e}) — skipped, retry next run", flush=True)
+        time.sleep(pause)
+    return failed
+
+
+def pull_static(isins):
+    """Pull Bloomberg static (linkers.STATIC_FIELDS) for an arbitrary ISIN list -> static/<isin>.parquet
+    (assumes a bbg session is open). Used for nominal hedge bonds that aren't in the linker universe."""
+    secs = [f"{i} {linkers.BBG_SUFFIX}" for i in isins]
+    st = {}
+    for k in range(0, len(secs), 50):
+        st.update(bbg.reference(secs[k:k + 50], linkers.STATIC_FIELDS))
+    for i in isins:
+        rec = st.get(f"{i} {linkers.BBG_SUFFIX}", {})
+        if rec:
+            pd.DataFrame([{**{"isin": i}, **rec}]).to_parquet(os.path.join(CACHE, "static", f"{i}.parquet"))
+    return st
+
+
 def pull_bonds(skip_existing=True, include_deferred=False, do_enrich=True, pause=0.2):
-    """Pull static (via linkers.enrich) + daily for the whole universe, ONE bond at a time, each in
-    small date windows (_history_one). Per-bond isolation + date-chunking keep every request small
-    enough to dodge the backend timeout, and a bond that still fails is logged and SKIPPED (the run
-    continues). skip_existing makes it RESUMABLE: re-run and it pulls only the not-yet-cached bonds,
-    so a few re-runs converge even if the terminal throttles."""
+    """Pull static (via linkers.enrich) + daily for the whole linker universe, ONE bond at a time in
+    small date windows (resilient to the backend timeout; resumable via skip_existing)."""
     _ensure_dirs()
     u = linkers.load_universe(include_deferred=include_deferred)
     if skip_existing:
@@ -217,22 +258,32 @@ def pull_bonds(skip_existing=True, include_deferred=False, do_enrich=True, pause
         linkers.enrich(write=True)                            # static for all (cheap, also confirms)
     isins = u["isin"].tolist()
     bbg.open_session()
-    failed = []
     try:
-        for n, i in enumerate(isins, 1):
-            sec = f"{i} {linkers.BBG_SUFFIX}"
-            try:
-                rows = _history_one(sec, DAILY_FIELDS, DAILY_START, TODAY)
-                nr = _save_daily(i, rows)
-                print(f"  [{n}/{len(isins)}] {i} -> {nr} rows", flush=True)
-            except Exception as e:
-                failed.append(i)
-                print(f"  [{n}/{len(isins)}] {i} FAILED ({e}) — skipped, retry next run", flush=True)
-            time.sleep(pause)
+        failed = _pull_daily(isins, pause)
     finally:
         bbg.close_session()
     print(f"  done: {len(isins) - len(failed)} pulled, {len(failed)} failed"
           + (f": {', '.join(failed)}" if failed else ""))
+
+
+def pull_isins(isins, skip_existing=True, pause=0.2):
+    """Pull static + daily for an arbitrary ISIN list (the breakeven NOMINAL hedge bonds, which
+    aren't in the linker universe). Resumable; returns failed ISINs."""
+    _ensure_dirs()
+    isins = list(dict.fromkeys(str(i) for i in isins if i))   # dedup, keep order
+    if skip_existing:
+        isins = [i for i in isins if not os.path.exists(os.path.join(CACHE, "daily", f"{i}.parquet"))]
+    if not isins:
+        print("  all requested ISINs already cached"); return []
+    bbg.open_session()
+    try:
+        pull_static(isins)
+        failed = _pull_daily(isins, pause)
+    finally:
+        bbg.close_session()
+    print(f"  done: {len(isins) - len(failed)} pulled, {len(failed)} failed"
+          + (f": {', '.join(failed)}" if failed else ""))
+    return failed
 
 
 def pull_ir_check(years=3, batch=8, include_deferred=False):

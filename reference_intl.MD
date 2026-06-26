@@ -97,12 +97,16 @@ They are **catalogued** (ISIN, coupon, maturity, the relevant RPI base months) s
 
 ---
 
-## 6. Financing & carry (Phase-1 default; the cross-country normalization is a desk decision)
+## 6. Financing & carry (desk-confirmed: own-country GC, local currency)
 
-- **Phase 1 finances each bond in its own local GC repo:** euro linkers at **€STR-based GC** (€STR / EUREPO / GC pooling proxy), gilts at **SONIA-based GC**. Local currency, **no FX leg**. This is the faithful single-bond financed return and avoids inventing cross-currency basis.
-- **GC mid only, specialness out of scope** (same as US). Repo bid/offer stays a tunable half-spread `x` applied after the build. Auction/syndication-cycle **repo specialness** (larger and lumpier in the smaller euro markets) is *flagged* for the future supply study but **not modeled** now.
-- **Carry decomposition** (nominal carry = coupon − repo; inflation carry = accretion) is country-specific because each inflation seasonal (US CPI / euro HICP / UK RPI) differs — relevant to any future seasonal/bucketing layer, not to the raw per-bond return.
-- **DECISION DEFERRED (boss):** whether carry/return is reported in each bond's local funding or **normalized to one base currency** (which injects cross-currency basis as a P&L line). Phase 1 = local. Cross-currency normalization is a switch we add when the desk decides. See §8.
+- **Each bond finances in its own-country GC repo, local currency, no FX leg** (boss: "always local currency"). Wired per country in `linkers.REPO_BY_COUNTRY` / `NOMINAL_MARKETS`.
+- **Core vs peripheral euro GC** (boss asked me to source tickers): use **CME RepoFunds Rate (RFR)**, country-specific sovereign GC off BrokerTec/MTS — Bloomberg page **`REPF <GO>`**. Indicative GC vs €STR: **DE ≈ −40bp, FR ≈ −56bp** (core, funds rich/special), **ES ≈ −9bp, IT ≈ +9bp** (periphery). RFR tickers are left `None` in `linkers.FINANCING` to fill from REPF (guessing a ticker risks silently pulling the wrong security); **until filled, `financing_series()` falls back to the cached €STR/SONIA single rate**, so the build runs either way (returns just use one euro GC). Menu of alternatives:
+  - **CME RFR per country** (`rfr_de/fr/it/es`) — the core/peripheral split; primary. Fill from REPF, then `python data_layer_intl.py macro`.
+  - **STOXX GC Pooling EUR ON** (`GCPION Index`, key `gcpool`) — single secured euro GC (no country split).
+  - **€STR** (`ESTRON`) / **SONIA** (`SONIO/N`) — unsecured O/N, the cached fallback.
+- **GC mid only, specialness out of scope** (boss confirmed). Repo bid/offer stays a tunable half-spread `x` applied after the build (`s_*`/`fin_sens` columns carry the sensitivity). Auction-cycle repo specialness (lumpier in the small euro markets) is *flagged* for the future supply study, not modeled.
+- **Breakeven financing**: each leg uses its own-country GC, so `net_fin_bp ≈ 0` for a same-country pair at GC mid, and **= the core-vs-peripheral GC differential** for a cross-country hedge (e.g. an Italian linker vs a Bund) — the sovereign-basis P&L line surfaced explicitly (§8.1).
+- **Carry decomposition** (nominal carry = coupon − repo; inflation carry = accretion) is country-specific (US CPI / euro HICP / UK RPI seasonals differ) — for the future bucketing layer, not the raw per-bond return.
 
 ---
 
@@ -116,13 +120,24 @@ They are **catalogued** (ISIN, coupon, maturity, the relevant RPI base months) s
 
 ---
 
-## 8. Decisions the desk still owns (do not hard-code without sign-off)
+## 8. Desk decisions — now resolved (boss, 2026-06)
 
-1. **Breakeven nominal leg** — own-country nominal (isolates inflation; both legs carry that sovereign's credit/liquidity; for IT/ES embeds the BTP–Bund / Bono–Bund spread) **vs** Bund/swap (cleaner rates, injects sovereign basis). No clean answer like TIPS-vs-UST. *Phase 1 builds outright legs only; breakeven construction waits on this.*
-2. **Funding normalization** — local funding per bond vs one base currency (§6).
-3. **Analysis-tool organization** — the boss has not decided how to bucket/curve these (no neat 5y/10y/30y, partly-syndicated). Phase 1 just produces clean per-bond returns + the issuance calendar as raw material.
-4. **Universe depth** — currently-outstanding only vs include matured bonds for history (Phase-1 default below).
-5. **Structural regime breaks** to encode for any cross-year stacking: **Germany no new issuance from 2024** (auction-anchored framework N/A); **UK RPI→CPIH reform from 2030** (full alignment after the Jan-2031 print) — treat pre/post-2030 as a regime change, not continuous history.
+### 8.1 Breakeven nominal leg — RESOLVED: lookup table (`breakeven_map.csv`)
+The street keeps a list of the nominal bond used as each linker's breakeven comparator, so we do
+**not** pick the hedge — we look it up. `breakeven_intl.py` reads `breakeven_map.csv`
+(`real_isin, nominal_isin, beta, note`); the desk's file plugs straight in. Mechanics:
+- `r_BE = r_real − beta·r_nominal`, both DV01-normalized (100k DV01/leg) — `beta=1.0` = equal-DV01 plain breakeven (my default when the map omits beta; document any other choice in the `note`).
+- The nominal leg is `engine_intl.nominal_series` (index OFF → IR=1), financed in the **nominal bond's own-country GC** (auto-detected from its ISIN/COUNTRY). So own-country pairs net financing ≈0; a Bund/swap-style cross-country hedge carries the **BTP–Bund / Bono–Bund** GC+sovereign basis as `net_fin_bp` — visible, not hidden. The street list decides which; the engine handles either.
+- DV01 from `pricing.py` for both legs on one basis (no BBG risk). Beta-adjust by setting `beta<1` per row.
+
+### 8.2 Other answers (locked in)
+- **Funding currency:** always **local** (no cross-currency normalization). §6.
+- **Rebasing:** computed IR keeps m/m correct and jump-free (base recomputed off the same current-base series; cross-checked vs BBG `INDEX_RATIO` via `ircheck`). §4.
+- **Separate curves / special instruments:** OAT€i vs OATi, BTP€i only; **BTP Italia and ALL 8m-lag gilts ignored** (not even analytics built) — deferred/excluded in `linkers` (the 8m gilts stopped being issued long ago). The 3 Spanish private placements are non-traded (no price series) → excluded.
+
+### 8.3 Still open (post-returns, per boss "we'll think about how to organize")
+- **Analysis-tool organization** — how to bucket/curve these (no neat 5y/10y/30y; partly syndicated). The #1 objective is **returns of the most liquid bonds around auctions and around the year**; liquidity fades with age, so organization waits until returns are in hand. Phase-1 output (per-bond returns + issuance calendar) is the raw material.
+- **Structural regime breaks** for any cross-year stacking: **Germany no new issuance from 2024**; **UK RPI→CPIH reform from 2030** (full alignment after the Jan-2031 print) — treat pre/post-2030 as a regime change.
 
 ---
 

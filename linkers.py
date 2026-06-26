@@ -43,13 +43,25 @@ REF_INDEX = {
     "IT_FOIXT":   dict(ticker="ITCPIUNR Index",  desc="Italy FOI ex-tobacco NSA (ISTAT) — for BTP Italia (deferred); VERIFY"),
 }
 
-# Local GC financing proxies (one funding curve per currency; reference_intl §6). These are
-# clean overnight proxies -- swap to a true GC-repo ticker (RepoFunds Rate / GC Pooling / DMO GC)
-# if/when the desk wants secured financing. VERIFY tickers on the terminal.
+# Local GC financing (reference_intl §6; bonds finance in own-country GC, no specialness, local ccy).
+# Core vs PERIPHERAL euro GC = CME RepoFunds Rate (RFR), country-specific sovereign repo off
+# BrokerTec/MTS (Bloomberg page REPF <GO>). Indicative GC vs €STR: DE ≈ −40bp, FR ≈ −56bp,
+# ES ≈ −9bp, IT ≈ +9bp -- i.e. core funds rich (special), periphery cheaper. RFR tickers are left
+# `None` to fill from REPF (guessing risks silently pulling the WRONG security); until filled,
+# financing_series() falls back to the cached €STR/SONIA single rate, so the build still runs.
+# Alternative single secured euro GC: STOXX GC Pooling EUR ON = "GCPION Index" (set a market's
+# repo to "gcpool" to use it). See reference_intl §6 for the menu.
 FINANCING = {
-    "estr_gc":  dict(ticker="ESTRON Index",   ccy="EUR", desc="€STR overnight (euro GC proxy)"),
-    "sonia_gc": dict(ticker="SONIO/N Index",  ccy="GBP", desc="SONIA overnight (gilt GC proxy)"),
+    "estr_gc":  dict(ticker="ESTRON Index",  ccy="EUR", desc="€STR unsecured O/N — euro fallback (cached)"),
+    "sonia_gc": dict(ticker="SONIO/N Index", ccy="GBP", desc="SONIA O/N — gilt GC proxy (cached)"),
+    "gcpool":   dict(ticker="GCPION Index",  ccy="EUR", desc="STOXX GC Pooling EUR ON — secured euro GC (single rate)"),
+    "rfr_de":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Germany — core GC (fill ticker from REPF)"),
+    "rfr_fr":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate France — core GC (fill ticker from REPF)"),
+    "rfr_it":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Italy — peripheral GC (fill ticker from REPF)"),
+    "rfr_es":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Spain — peripheral GC (fill ticker from REPF)"),
 }
+EUR_FALLBACK_REPO = "estr_gc"
+GBP_FALLBACK_REPO = "sonia_gc"
 
 # Settlement calendars (for business-day rolling, settlement lag, month-end anchor). The engine
 # builds a holiday-aware calendar per id (reference_intl §1). 'TARGET2' = euro; 'UK' = gilt.
@@ -107,6 +119,40 @@ def active_markets():
     return [m for m in MARKETS if not is_deferred(m)]
 
 
+# Own-country GC repo per country (reference_intl §6): core (DE/FR) vs peripheral (IT/ES) euro GC via
+# CME RepoFunds Rate; gilts via SONIA. Applied to the active markets (deferred keep their default).
+REPO_BY_COUNTRY = {"FR": "rfr_fr", "DE": "rfr_de", "IT": "rfr_it", "ES": "rfr_es", "GB": "sonia_gc"}
+for _m, _c in MARKETS.items():
+    if not _c.get("deferred"):
+        _c["repo"] = REPO_BY_COUNTRY.get(_c["country"], _c.get("repo"))
+
+
+# Nominal-government-bond conventions, by country, for the breakeven hedge leg (reference_intl §8.1).
+# Same machinery as a linker but index=None (no inflation uplift, IR=1) and no floor; coupon
+# frequency is read from each bond's Bloomberg static (freq_default is the country norm if missing):
+# nominal OAT/Bund/Bono pay ANNUAL, BTP/gilt pay SEMIANNUAL. Financed in the same own-country GC.
+NOMINAL_MARKETS = {
+    "FR": dict(calendar="TARGET2", settle_lag=2, repo="rfr_fr",   freq_default=1),
+    "DE": dict(calendar="TARGET2", settle_lag=2, repo="rfr_de",   freq_default=1),
+    "IT": dict(calendar="TARGET2", settle_lag=2, repo="rfr_it",   freq_default=2),
+    "ES": dict(calendar="TARGET2", settle_lag=2, repo="rfr_es",   freq_default=1),
+    "GB": dict(calendar="UK",      settle_lag=1, repo="sonia_gc", freq_default=2),
+}
+
+
+def nominal_conv(country):
+    """Conventions dict for a NOMINAL government bond used as a breakeven hedge leg (index=None)."""
+    n = NOMINAL_MARKETS.get(country)
+    if n is None:
+        raise KeyError(f"no nominal conventions for country {country!r}; known: {sorted(NOMINAL_MARKETS)}")
+    return dict(country=country, index=None, freq=None, floor=False, lag_months=3, interp=True, **n)
+
+
+def country_of_isin(isin):
+    """Best-effort issuer country from an ISIN prefix (BBG static COUNTRY is the authoritative check)."""
+    return {"FR": "FR", "IT": "IT", "ES": "ES", "DE": "DE", "GB": "GB"}.get(str(isin)[:2])
+
+
 # ===========================================================================================
 # SEED UNIVERSE -- the curated backbone (one row per BOND/ISIN). Compiled from DMO sources
 # (AFT, MEF, Tesoro, Finanzagentur, UK DMO); see reference_intl.MD §10 and the research note.
@@ -150,6 +196,7 @@ SEED_UNIVERSE = [
     ("IT0005588881", "IT_BTPEI", 1.80, "2036-05-15", "2023-11-15", "BTPEI 1.8 05/15/36"),
     ("IT0005547812", "IT_BTPEI", 2.40, "2039-05-15", "2023-05-15", "BTPEI 2.4 05/15/39"),
     ("IT0004545890", "IT_BTPEI", 2.55, "2041-09-15", "2009-09-15", "BTPEI 2.55 09/15/41"),
+    ("IT0005706293", "IT_BTPEI", 2.25, "2046-02-15", "",           "BTPEI 2.25 02/15/46"),
     ("IT0005436701", "IT_BTPEI", 0.15, "2051-05-15", "2020-11-15", "BTPEI 0.15 05/15/51"),
     ("IT0005647273", "IT_BTPEI", 2.55, "2056-05-15", "2024-11-15", "BTPEI 2.55 05/15/56"),
     # ---- Spain Bonos/Obligaciones€i (euro HICPxt, annual); *48/*49/*50 are non-traded private placements ----
@@ -291,6 +338,84 @@ def enrich(write=True):
     return out
 
 
+def directory(write=True):
+    """Human-readable ISIN dictionary for EVERY bond in the system (linkers + their nominal hedge
+    bonds): ISIN -> description, coupon, maturity, country, role, and (for linkers) the paired
+    nominal comparator. Sources: universe.csv (linkers) + breakeven_map.csv (nominals & pairing),
+    upgraded with the Bloomberg static cache (authoritative coupon/maturity) where it's been pulled.
+    Writes cache_intl/isin_directory.csv + ISIN_DIRECTORY.md. Re-run after pulling the nominals to
+    fill their exact coupon/maturity."""
+    rows, pair = {}, {}
+    u = load_universe(include_deferred=True)
+    for _, r in u.iterrows():
+        rows[r["isin"]] = {"isin": r["isin"], "role": "linker", "country": r["country"],
+                           "program": r["program"], "desc": r["desc"],
+                           "coupon": r["cpn"], "maturity": r["maturity"], "comparator_isin": pd.NA}
+    bm = os.path.join(HERE, "breakeven_map.csv")
+    if os.path.exists(bm):
+        m = pd.read_csv(bm, comment="#")
+        for _, r in m.iterrows():
+            note = str(r.get("note", "")); parts = note.split(" vs ", 1)
+            if r["real_isin"] in rows:                       # tag the linker with its hedge
+                rows[r["real_isin"]]["comparator_isin"] = r["nominal_isin"]
+            ni = str(r["nominal_isin"])
+            pair[ni] = parts[0] if parts else ""             # which linker this nominal hedges
+            if ni not in rows:
+                rows[ni] = {"isin": ni, "role": "nominal", "country": country_of_isin(ni),
+                            "program": "nominal govt", "desc": (parts[1] if len(parts) > 1 else ni),
+                            "coupon": pd.NA, "maturity": pd.NA, "comparator_isin": pd.NA}
+    for isin, rec in rows.items():                            # upgrade from BBG static where present
+        sp = os.path.join(CACHE, "static", f"{isin}.parquet")
+        if os.path.exists(sp):
+            s = pd.read_parquet(sp).iloc[0]
+            if pd.notna(s.get("CPN")):
+                rec["coupon"] = float(s["CPN"])
+            if pd.notna(s.get("MATURITY")):
+                rec["maturity"] = str(pd.Timestamp(s["MATURITY"]).date())
+    df = pd.DataFrame(rows.values())
+    df["maturity"] = df["maturity"].astype(str)
+    df = df.sort_values(["country", "role", "maturity"]).reset_index(drop=True)
+    if write:
+        _ensure_dirs()
+        df.to_csv(os.path.join(CACHE, "isin_directory.csv"), index=False)
+        _write_directory_md(df, pair)
+        print(f"  wrote cache_intl/isin_directory.csv + ISIN_DIRECTORY.md "
+              f"({len(df)} ISINs: {(df.role=='linker').sum()} linkers, {(df.role=='nominal').sum()} nominals)")
+    return df
+
+
+def _write_directory_md(df, pair):
+    """Readable markdown: breakeven pairs per country + a flat ISIN lookup."""
+    cty_name = {"FR": "France", "IT": "Italy", "ES": "Spain", "DE": "Germany", "GB": "United Kingdom"}
+    lines = ["# ISIN directory — European/UK linkers & breakeven hedge bonds", "",
+             "Generated from `universe.csv` + `breakeven_map.csv` (+ Bloomberg static where pulled). "
+             "Re-run `python linkers.py directory` to refresh.", ""]
+    bm = os.path.join(HERE, "breakeven_map.csv")
+    if os.path.exists(bm):
+        m = pd.read_csv(bm, comment="#")
+        d = df.set_index("isin")
+        lines += ["## Breakeven pairs (linker → nominal hedge)", ""]
+        for cty in ["FR", "IT", "ES", "GB"]:
+            sub = m[m["real_isin"].astype(str).str[:2] == cty]
+            if sub.empty:
+                continue
+            lines += [f"### {cty_name.get(cty, cty)} ({len(sub)})", "",
+                      "| Linker ISIN | Linker | → | Hedge ISIN | Nominal hedge |", "|---|---|---|---|---|"]
+            for _, r in sub.iterrows():
+                note = str(r.get("note", "")); p = note.split(" vs ", 1)
+                lk = p[0] if p else r["real_isin"]; nm = p[1] if len(p) > 1 else r["nominal_isin"]
+                lines.append(f"| `{r['real_isin']}` | {lk} | → | `{r['nominal_isin']}` | {nm} |")
+            lines.append("")
+    lines += ["## Flat lookup (all ISINs)", "", "| ISIN | Bond | Cpn | Maturity | Country | Role |",
+              "|---|---|---|---|---|---|"]
+    for _, r in df.iterrows():
+        cpn = "" if pd.isna(r["coupon"]) else f"{float(r['coupon']):g}%"
+        mat = "" if r["maturity"] in ("nan", "NaT", "") else r["maturity"]
+        lines.append(f"| `{r['isin']}` | {r['desc']} | {cpn} | {mat} | {r['country']} | {r['role']} |")
+    with open(os.path.join(HERE, "ISIN_DIRECTORY.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def market_matrix():
     """The per-market convention matrix as a DataFrame (for inspection / the export README)."""
     rows = []
@@ -321,6 +446,8 @@ if __name__ == "__main__":
         print(u.groupby(["country", "program"]).size().to_string())
     elif cmd == "enrich":
         print(enrich().to_string())
+    elif cmd == "directory":
+        directory()
     elif cmd == "status":
         _ensure_dirs()
         n_static = len(os.listdir(os.path.join(CACHE, "static")))

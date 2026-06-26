@@ -35,13 +35,22 @@ python engine_intl.py                   :: build every active bond -> cache_intl
 python engine_intl.py FR0010135525      :: one bond + summary
 python export_intl.py                   :: exports/linkers_returns.xlsx (one sheet per bond) + per-bond CSVs
 python export_intl.py --no-update       :: export from cache_intl as-is (no Bloomberg pull)
+
+:: --- breakeven (long linker / short nominal hedge; reference_intl §8.1) ---
+:: 1) paste the desk's street list into breakeven_map.csv (real_isin,nominal_isin,beta,note), then:
+python breakeven_intl.py pull           :: pull the nominal hedge bonds (static+daily), resumable
+python breakeven_intl.py build          :: r_BE = r_real - beta*r_nom -> cache_intl/breakeven/<real_isin>.parquet
+python breakeven_intl.py export         :: exports/linkers_breakeven.xlsx (one sheet per pair) + MAP/README
 ```
 
-Files added: `linkers.py` (conventions + universe), `data_layer_intl.py` (pulls + index ratio),
-`engine_intl.py` (per-bond financed TR), `auctions_intl.py` (issuance calendar), `export_intl.py`
-(per-bond sheets). Reference-index tickers and €STR/SONIA tickers in `linkers.py` are best-known
-and **flagged to verify on the terminal** on the first pull (the US field map was likewise
-validated live before being trusted).
+Files added: `linkers.py` (conventions + universe + GC repos), `data_layer_intl.py` (pulls + index
+ratio), `engine_intl.py` (per-bond financed TR — linker or nominal leg), `auctions_intl.py`
+(issuance calendar), `export_intl.py` (per-bond sheets), `breakeven_intl.py` + `breakeven_map.csv`
+(breakeven via the street lookup). **Financing:** each bond funds in own-country GC, local ccy
+(boss). Core/peripheral euro GC = CME **RepoFunds Rate** (Bloomberg `REPF <GO>`); those tickers are
+left blank in `linkers.FINANCING` to fill from REPF — until then financing falls back to the cached
+€STR/SONIA single rate, so everything still runs. Reference-index + financing tickers are flagged to
+**verify on the terminal** (the US field map was likewise validated live first).
 
 ## Setup (contained env)
 

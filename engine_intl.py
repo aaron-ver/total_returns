@@ -59,10 +59,30 @@ def _static(isin):
     return cpn, maturity, pd.Timestamp(dated)
 
 
+def _static_freq(isin):
+    """Coupon frequency (coupons/year) from Bloomberg static CPN_FREQ, or None if absent."""
+    try:
+        s = pd.read_parquet(os.path.join(CACHE, "static", f"{isin}.parquet")).iloc[0]
+        f = s.get("CPN_FREQ")
+        return int(float(f)) if pd.notna(f) and float(f) > 0 else None
+    except Exception:
+        return None
+
+
 def bond_series(isin, market):
-    """Daily financed bp return for one linker, walked end-to-end. Returns a DataFrame indexed by
-    observation date with the full per-day detail, or empty if data is missing."""
-    c = linkers.conv(market)
+    """Daily financed bp return for one LINKER, walked end-to-end (conventions from linkers.MARKETS)."""
+    return _walk(isin, linkers.conv(market), market)
+
+
+def nominal_series(isin, country):
+    """Daily financed bp return for one NOMINAL government bond (the breakeven hedge leg): same walk
+    with index OFF (IR=1, no inflation uplift), own-country GC, coupon frequency from BBG static."""
+    return _walk(isin, linkers.nominal_conv(country), f"NOM_{country}")
+
+
+def _walk(isin, c, label):
+    """Generalized per-bond financed-return walk. `c` is a conventions dict (linker market or a
+    nominal-bond conv); index=None -> nominal leg (IR=1). Returns the full per-day detail frame."""
     path = os.path.join(CACHE, "daily", f"{isin}.parquet")
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -73,15 +93,17 @@ def bond_series(isin, market):
     if len(df) < 2:
         return pd.DataFrame()
     coupon, maturity, dated = _static(isin)
-    freq = int(c["freq"])
+    freq = int(c["freq"]) if c.get("freq") else (_static_freq(isin) or int(c.get("freq_default", 2)))
     cal = trading_calendar(c["calendar"])
     settle = _settle_array(df.index, int(c["settle_lag"]), cal)          # T+lag per obs (DatetimeIndex)
 
-    # index ratio at each settlement date (rules-based, §3-§4), aligned back to the obs index
-    rounding = "trunc6round5" if c["country"] == "US" else "round5"
-    ir_at_settle = dl.index_ratio_series(c["index"], dated, settle, int(c["lag_months"]),
-                                         bool(c["interp"]), rounding=rounding)
-    ir = pd.Series(ir_at_settle.reindex(settle).to_numpy(), index=df.index)
+    if c.get("index"):                                                   # inflation leg: rules-based IR
+        rounding = "trunc6round5" if c.get("country") == "US" else "round5"
+        ir_at_settle = dl.index_ratio_series(c["index"], dated, settle, int(c.get("lag_months", 3)),
+                                             bool(c.get("interp", True)), rounding=rounding)
+        ir = pd.Series(ir_at_settle.reindex(settle).to_numpy(), index=df.index)
+    else:                                                               # nominal leg: IR = 1
+        ir = None
 
     # BBG's own index ratio for cross-check (stored, not used to drive returns)
     bbg_ir = d["INDEX_RATIO"].reindex(df.index) if "INDEX_RATIO" in d else pd.Series(index=df.index, dtype=float)
@@ -116,7 +138,7 @@ def bond_series(isin, market):
             if sp < pdte <= st:                             # coupon paid within the settle span
                 cpn += (coupon / freq) * float(rt["IR"])
         pnl = dV + cpn - fin
-        rows[t] = {"isin": isin, "market": market, "settle": st,
+        rows[t] = {"isin": isin, "market": label, "settle": st,
                    "clean": rt["clean"], "yield": rt["ytm"], "accrued": rt["accrued"],
                    "IR": rt["IR"], "IR_bbg": float(bbg_ir.get(t)) if pd.notna(bbg_ir.get(t)) else np.nan,
                    "dirty_real": rt["dirty_real"], "V": Vt, "V_prev": Vp,
