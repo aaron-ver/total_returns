@@ -64,6 +64,18 @@ BP_USD = 100_000.0          # 1 engine bp of breakeven = $100k (each leg sized t
 WINDOWS = {"2y": 2, "5y": 5}   # trailing rolling-regression windows (years), daily PnL
 RATIOS = os.path.join(CACHE, "hedge_ratios.parquet")
 
+# STATIC full-sample hedge ratios (desk decision: don't mechanically rebalance — run ONE regression
+# over the entire horizon and hardcode the ratio per tenor, adjustable). Stored as the per-leg gas
+# betas (bT, bU) so the β slider stays consistent: h(β) = bT − β·bU contracts. At β=100 the headline
+# ratios are 5y≈75.9, 10y≈48.7, 30y≈33.7. These are HARDCODED PARAMETERS — edit to override; re-derive
+# from the current data with full_sample_betas(tenor). (Full-sample = in-sample/structural, not a
+# walk-forward backtest.)
+FULL_HEDGE = {
+    "5y":  (39.1140, -36.8186),
+    "10y": (4.5349, -44.1762),
+    "30y": (-12.8255, -46.5225),
+}
+
 
 def aligned_pairs(tenor, beta=1.0):
     """Daily (gas $/contract, per-leg & breakeven $) pairs on the energy common-day calendar.
@@ -194,9 +206,9 @@ def daily_gas_usd(index=None):
 
 
 def hedge_coef_map(tenor, windows=WINDOWS):
-    """{window: {'YYYY-MM': [bT, bU]}} for the dashboard payload -- the month's per-leg slopes,
-    keyed by the rebalance month. Client forms h(beta)=bT-beta*bU and the hedged P&L for any beta
-    and either window, fully client-side."""
+    """For the dashboard payload: {window: {'YYYY-MM': [bT, bU]}} for the rolling windows (monthly
+    rebalance) PLUS {'full': [bT, bU]} -- the STATIC full-sample coefficients (no month key, used
+    for every date). Client forms h(beta)=bT-beta*bU and the hedged P&L for any beta/window."""
     lb = monthly_leg_betas(tenor, windows)
     out = {tag: {} for tag in windows}
     for _, r in lb.iterrows():
@@ -205,6 +217,9 @@ def hedge_coef_map(tenor, windows=WINDOWS):
             bT, bU = r[f"bT_{tag}"], r[f"bU_{tag}"]
             if pd.notna(bT) and pd.notna(bU):
                 out[tag][ym] = [round(float(bT), 4), round(float(bU), 4)]
+    bT, bU = FULL_HEDGE.get(tenor, (None, None))           # static full-sample (no rebalance)
+    if bT is not None:
+        out["full"] = [round(float(bT), 4), round(float(bU), 4)]
     return out
 
 
@@ -236,9 +251,23 @@ def load_ratios():
     return pd.read_parquet(RATIOS)
 
 
+def full_sample_betas(tenor):
+    """(bT, bU) from a single regression over the ENTIRE aligned horizon (no rolling) — the static
+    full-sample gas betas. Used to (re)derive the hardcoded FULL_HEDGE constants."""
+    p = aligned_pairs(tenor)
+    if p.empty:
+        return (float("nan"), float("nan"))
+    return (_ols(p["gas_usd"], p["tips_usd"])["slope"], _ols(p["gas_usd"], p["ust_usd"])["slope"])
+
+
 def daily_hedge_beta(tenor, index, window="5y", beta=1.0):
     """Daily-forward-filled hedge ratio (contracts) for `beta` and `window`: each date maps to its
-    month's h(beta) = bT - beta*bU. NaN before the first available rebalance (no hedge yet)."""
+    month's h(beta) = bT - beta*bU. NaN before the first available rebalance (no hedge yet).
+    window='full' uses the STATIC hardcoded full-sample ratio (FULL_HEDGE) for every date — no
+    rebalance, applied across the entire horizon."""
+    if window == "full":
+        bT, bU = FULL_HEDGE.get(tenor, (float("nan"), float("nan")))
+        return pd.Series(bT - beta * bU, index=index)
     lb = monthly_leg_betas(tenor)
     if lb.empty or f"bT_{window}" not in lb:
         return pd.Series(np.nan, index=index)

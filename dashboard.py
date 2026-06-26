@@ -220,8 +220,8 @@ __PLOTLY__
       <input type="range" id="beta" min="0" max="150" step="5" value="100"></div>
     <div class="grp bev" id="gasgrp" style="display:none"><label>Gasoline hedge <span class="note" style="padding:0">BE − h·gas (short gas vs long BE)</span></label>
       <div class="seg" id="gas"><button data-gas="off" class="on">Off</button><button data-gas="on">On</button></div></div>
-    <div class="grp bev" id="gwingrp" style="display:none"><label>Hedge window <span class="note" style="padding:0">rolling regression lookback</span></label>
-      <div class="seg" id="gwin"><button data-gwin="2y">2Y</button><button data-gwin="5y" class="on">5Y</button></div></div>
+    <div class="grp bev" id="gwingrp" style="display:none"><label>Hedge window <span class="note" style="padding:0">lookback (Full = static full-sample, no rebalance)</span></label>
+      <div class="seg" id="gwin"><button data-gwin="2y">2Y</button><button data-gwin="5y">5Y</button><button data-gwin="full" class="on">Full</button></div></div>
     <div class="grp sv" style="display:none"><label>Sample window(s)</label>
       <div class="checks" id="swin">
         <label><input type="checkbox" value="full" checked><span class="sw" style="background:#2f81f7"></span><b>Full</b><span class="rng">2011 → now</span></label>
@@ -303,7 +303,7 @@ __PLOTLY__
 <script>
 const DATA = __DATA__;
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, gas:"off", gwin:"5y", seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, gas:"off", gwin:"full", seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -312,12 +312,15 @@ const $ = id => document.getElementById(id);
 const fmt = (x,d=1) => (x>=0?"+":"") + x.toFixed(d);
 const cls = x => x>=0?"pos":"neg";
 // --- gasoline hedge: h(β) = bT − β·bU contracts (per tenor/window/month); hedged BE $ = BE$ − h·gas$ ---
+const WINLAB={"2y":"2Y","5y":"5Y","full":"full-sample"};
 function hLookup(hedgeObj, ym, beta){          // ym = "YYYY-MM"; returns contracts h(β) for the active window, or null
-  if(!hedgeObj) return null; const o=hedgeObj[S.gwin]; if(!o) return null;
+  if(!hedgeObj) return null;
+  if(S.gwin==="full"){ const c=hedgeObj.full; return c ? c[0]-beta*c[1] : null; }   // STATIC full-sample (no rebalance)
+  const o=hedgeObj[S.gwin]; if(!o) return null;
   const c=o[ym]; return c ? c[0]-beta*c[1] : null; }
 function gasOn(){ return S.gas==="on"; }
-function gasNote(){ return gasOn()?", gas-hedged "+S.gwin.toUpperCase():""; }   // appended to BE metric labels
-function cfgLab(){ return "β="+S.beta+"%"+(gasOn()?", gas-hedged "+S.gwin.toUpperCase():""); }   // chart/totals tag
+function gasNote(){ return gasOn()?", gas-hedged "+WINLAB[S.gwin]:""; }   // appended to BE metric labels
+function cfgLab(){ return "β="+S.beta+"%"+(gasOn()?", gas-hedged "+WINLAB[S.gwin]:""); }   // chart/totals tag
 
 function winIdx(){
   const d = DATA[S.tenor], n = d.dates.length; let lo=0, hi=n-1;

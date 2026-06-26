@@ -40,10 +40,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = engine.CACHE
 EXPORTS = os.path.join(HERE, "exports")
 TENORS = ["5y", "10y", "30y"]
-# Single hedge window for the per-tenor PnL columns (the hedge SHEET keeps both 2y & 5y). The
-# desk asked for a single-select window here to keep the daily sheets simple; flip to "2y" if
-# preferred. The dashboard exposes a live 2y/5y toggle.
-EXPORT_HEDGE_WINDOW = "5y"
+# Hedge window for the per-tenor PnL columns. Desk decision: use the STATIC full-sample ratio
+# (hedge.FULL_HEDGE) — one regression over the whole horizon, no monthly rebalance. Set to "2y" or
+# "5y" for the rolling walk-forward ratio instead. (The hedge SHEET still lists the 2y/5y monthly
+# ratios for reference.) The dashboard exposes a live 2Y/5Y/Full toggle.
+EXPORT_HEDGE_WINDOW = "full"
 
 # Output column order (per-tenor sheet), built in tenor_full().
 FULL_COLS = [
@@ -130,11 +131,14 @@ ENERGY_README_ROWS = [
         "(a bond day with no gas obs -> NaN; that move lands on the next common day). Plus the "
         "gasoline-hedge columns below (window = the `hedge` sheet's both-window detail, condensed "
         "here to a single selected window shown in `gas_hedge_window`):"),
-    ("gas_hedge_window", "which trailing window the per-tenor hedge ratios/PnL below use (2y or 5y)."),
-    ("gas_hedge_contracts_BE100 / _BE75", "the month's gasoline hedge ratio for THIS tenor, in # of "
-        "42,000-gal contracts, from a trailing daily regression of breakeven $ on gas $/contract, "
-        "held all month (in sync with the DV01 rebalance). BE100 = pure breakeven (β=1); BE75 = "
-        "75%-beta breakeven (TIPS − 0.75·UST). Positive => co-moving; SHORT this many vs a LONG BE."),
+    ("gas_hedge_window", "which lookback the per-tenor hedge ratios/PnL below use: 'full' = the "
+        "STATIC full-sample ratio (one regression over the whole horizon, hardcoded in hedge.FULL_HEDGE, "
+        "no rebalance — desk default); '2y'/'5y' = the trailing rolling walk-forward ratio."),
+    ("gas_hedge_contracts_BE100 / _BE75", "the gasoline hedge ratio for THIS tenor, in # of 42,000-gal "
+        "contracts (constant when window='full'; monthly when '2y'/'5y'). From a daily regression of "
+        "breakeven $ on gas $/contract. BE100 = pure breakeven (β=1); BE75 = 75%-beta breakeven "
+        "(TIPS − 0.75·UST). Positive => co-moving; SHORT this many vs a LONG BE. Full-sample β=100 "
+        "ratios ≈ 5y 75.9, 10y 48.7, 30y 33.7 contracts."),
     ("r_BE75_bp", "75%-beta breakeven daily return = r_TIPS_bp − 0.75·r_UST_bp (vs r_BE_bp = β=100%)."),
     ("r_BE100_hedged_bp / r_BE75_hedged_bp", "gas-HEDGED daily breakeven return (bp) = BE − "
         "h·(gas $/contract)/$100k, where h is that month's BE100 / BE75 contract ratio. Months "
