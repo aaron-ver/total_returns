@@ -304,13 +304,18 @@ def export_be(example=None):
         print("  no map -> no breakeven export"); return None
     folder = os.path.join(EXPORTS, "linker_breakevens")
     os.makedirs(folder, exist_ok=True)
-    pairs, empty = {}, []
+    pairs, empty, locked = {}, [], []
     for _, r in m.iterrows():
         o = build_be_full(r["real_isin"], r["nominal_isin"], float(r["beta"]), save=True)
         if o.empty:
             empty.append(r["real_isin"]); continue
-        o.to_csv(os.path.join(folder, f"{r['real_isin']}.csv"))
+        try:                                               # one locked file must not abort the rest
+            o.to_csv(os.path.join(folder, f"{r['real_isin']}.csv"))
+        except PermissionError:
+            locked.append(r["real_isin"]); continue
         pairs[r["real_isin"]] = (r, o)
+    if locked:
+        print(f"  !! {len(locked)} CSVs locked (open in Excel?) — not rewritten: {', '.join(locked[:6])}")
     if not pairs:
         print("  map present but no pair had data (run: breakeven_intl.py pull, engine_intl.py)"); return None
     with open(os.path.join(folder, "_README.md"), "w", encoding="utf-8") as f:

@@ -21,3 +21,6 @@ dashboard.html
 Thumbs.db
 .vscode/
 .idea/
+
+# Gilt Calendar
+/gilt_issuance

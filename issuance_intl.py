@@ -113,6 +113,29 @@ def pivot(ev, market, etype, values="count"):
     return p
 
 
+def pivot_combined(ev, market):
+    """year × original-tenor matrix with BOTH new issues and reopenings in one cell:
+       'N'      = N new issues (no reopenings)
+       'N+Rx'   = N new issues + R reopenings that year/tenor
+       'Rx'     = R reopenings only
+       ''       = nothing.  The 'x' flags reopenings (taps of an existing line)."""
+    d = ev[ev["market"] == market]
+    if d.empty:
+        return pd.DataFrame()
+    cnt = d.pivot_table(index="event_year", columns=["orig_tenor", "type"], values="isin",
+                        aggfunc="count", fill_value=0)
+    years = sorted(d["event_year"].unique())
+    tens = sorted(d["orig_tenor"].dropna().unique())
+    out = pd.DataFrame("", index=years, columns=[f"{int(t)}y" for t in tens])
+    for y in years:
+        for t in tens:
+            nn = int(cnt.get((t, "new"), pd.Series(0, index=cnt.index)).get(y, 0))
+            rr = int(cnt.get((t, "reopening"), pd.Series(0, index=cnt.index)).get(y, 0))
+            out.at[y, f"{int(t)}y"] = (f"{nn}+{rr}x" if nn and rr else f"{rr}x" if rr else str(nn) if nn else "")
+    out.index.name = "year"
+    return out
+
+
 def build():
     os.makedirs(EXPORTS, exist_ok=True)
     new = bond_issuance()
@@ -120,27 +143,33 @@ def build():
     has_reop = (ev["type"] == "reopening").any()
 
     md = ["# Linker issuance by year & original tenor (per market)", "",
-          "Original tenor = round(maturity − first issue) in years. Cells = **count** of events that year.",
-          ("Shows NEW issues and REOPENINGS." if has_reop else
-           "**NEW issues only** — run `python auctions_intl.py reopenings && python auctions_intl.py build` "
-           "to add reopenings (from Bloomberg AMT_OUTSTANDING history)."), ""]
+          "**What is a reopening / tap?** A government doesn't sell a whole bond at once. The FIRST sale "
+          "(auction or syndication) creates the bond — the *new issue* (ISIN fixed: coupon + maturity). It "
+          "then sells MORE of the **same** bond (same ISIN/coupon/maturity) at later auctions; each is a "
+          "*reopening* / *tap*, adding to amount outstanding. So one line is tapped repeatedly — roughly "
+          "monthly while it's the on-the-run — over its first ~1–3 years, which is why a single bond shows "
+          "many auction events.",
+          "",
+          "Original tenor = round(maturity − first issue) in years. Cell = **count of events that year**: "
+          "`N` = N new issues; `N+Rx` = N new + R reopenings; `Rx` = R reopenings only; blank = none. `x` flags "
+          "reopenings. Counts are **per year** — `10x` = 10 taps spread across that year's months (not one "
+          "month; a line is rarely tapped twice in a month).",
+          ("Markets shown with reopenings: FR, ES. " if has_reop else "") +
+          ("(IT/UK reopenings pending; DE issuance ended — those show NEW issues only.)"), ""]
     print("\n=== Linker issuance by year × original tenor (per market) ===")
+    print("cell:  N = new issues | N+Rx = N new + R reopenings | Rx = reopenings only | · = none")
     if not has_reop:
-        print("(NEW issues only — run auctions_intl.py reopenings + build to add reopenings)")
+        print("(NEW issues only so far — reopenings not loaded; see note below)")
     for m in MARKET_ORDER:
-        pn = pivot(ev, m, "new", "count")
-        if pn.empty:
+        pc = pivot_combined(ev, m)
+        if pc.empty:
             continue
         tens = sorted(new[new["market"] == m]["orig_tenor"].unique())
         n_re = int(((ev["market"] == m) & (ev["type"] == "reopening")).sum())
         hdr = (f"{MARKET_LABEL[m]}  —  {len(new[new['market']==m])} bonds, "
                f"{n_re} reopenings, tenors: {', '.join(str(t)+'y' for t in tens)}")
-        print(f"\n{hdr}\n[NEW issues]"); print(pn.to_string())
-        md += [f"## {hdr}", "", "**New issues**", "", "```", pn.to_string(), "```", ""]
-        pr = pivot(ev, m, "reopening", "count")
-        if not pr.empty:
-            print("[REOPENINGS]"); print(pr.to_string())
-            md += ["**Reopenings**", "", "```", pr.to_string(), "```", ""]
+        print(f"\n{hdr}"); print(pc.to_string())
+        md += [f"## {hdr}", "", "```", pc.to_string(), "```", ""]
     md_path = os.path.join(EXPORTS, "intl_issuance.md")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
@@ -171,15 +200,11 @@ def build():
         summ.to_excel(xl, sheet_name="SUMMARY", index=False)
         long.to_excel(xl, sheet_name="by_year_tenor_type", index=False)
         ev.to_excel(xl, sheet_name="events", index=False)              # granular log for seasonal work
-        for m in MARKET_ORDER:
-            pn = pivot(ev, m, "new", "count")
-            if pn.empty:
+        for m in MARKET_ORDER:                                          # combined matrix per market (N / N+Rx)
+            pc = pivot_combined(ev, m)
+            if pc.empty:
                 continue
-            sh = MARKET_LABEL[m].replace("€", "e")[:25]
-            pn.to_excel(xl, sheet_name=f"{sh} new#")
-            pr = pivot(ev, m, "reopening", "count")
-            if not pr.empty:
-                pr.to_excel(xl, sheet_name=f"{sh} reopen#")
+            pc.to_excel(xl, sheet_name=MARKET_LABEL[m].replace("€", "e")[:28])
         new.to_excel(xl, sheet_name="bonds", index=False)
         if _format:
             for ws in xl.sheets.values():

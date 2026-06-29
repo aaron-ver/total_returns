@@ -27,10 +27,101 @@ Usage:
   python auctions_intl.py sources     # print where to download each DMO's results files
 """
 from __future__ import annotations
-import os, sys, glob
+import os, sys, glob, re
 import pandas as pd
 
 import linkers
+
+# --- UK DMO D5D ("Outright Gilt Issuance Calendar") PDF parser -------------------------------
+# The DMO publishes one annual PDF per financial year with every gilt operation: date, gilt name,
+# nominal amount issued (£mn), and method (Auction/Syndication/Tender). We extract the INDEX-LINKED
+# gilts ("Index-linked Treasury GILT" — new-style; "...STOCK" = old-style 8m-lag, skipped), map
+# coupon+maturity to our UKTI ISINs, and classify each line: first sale of a gilt = NEW, rest = taps.
+_FRAC = {'¼': .25, '½': .5, '¾': .75, '⅛': .125, '⅜': .375, '⅝': .625, '⅞': .875, '⅓': 1/3, '⅔': 2/3}
+_DATE = re.compile(r'^\d{1,2}-[A-Za-z]{3}-\d{4}$')
+_CPNTOK = re.compile(r'^[\d/¼½¾⅛⅜⅝⅞.]+%?$')
+_NUM = re.compile(r'^[\d,]+\.\d+$')
+
+
+def _parse_coupon(s):
+    s = s.replace('%', '').strip()
+    for ch, v in _FRAC.items():
+        if ch in s:
+            w = s.replace(ch, '').strip(); return (float(w) if w else 0) + v
+    m = re.match(r'^(\d+)\s+(\d+)/(\d+)$', s)
+    if m: return int(m[1]) + int(m[2]) / int(m[3])
+    m = re.match(r'^(\d+)/(\d+)$', s)
+    if m: return int(m[1]) / int(m[2])
+    return float(s)
+
+
+def _parse_d5d_pdf(path):
+    """One D5D PDF -> list of {date, coupon, mat, amt_mn, method} for index-linked GILTs (executed rows)."""
+    import pdfplumber
+    rows = []
+    with pdfplumber.open(path) as pdf:
+        text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+    for line in text.splitlines():
+        toks = line.split(); low = [t.lower() for t in toks]
+        if 'index-linked' not in low:
+            continue
+        i = low.index('index-linked')
+        try:
+            g = toks.index('Gilt', i)                      # 'Gilt' after Index-linked ('Stock' -> skip)
+        except ValueError:
+            continue
+        if g + 1 >= len(toks) or not re.match(r'^\d{4}$', toks[g + 1]):
+            continue
+        mat = int(toks[g + 1])
+        cpn_toks, j = [], i - 1
+        while j >= 0 and _CPNTOK.match(toks[j]):
+            cpn_toks.insert(0, toks[j]); j -= 1
+        dt = next((t for t in toks if _DATE.match(t)), None)
+        amt = next((float(t.replace(',', '')) for t in toks[g + 2:] if _NUM.match(t)), None)
+        if not cpn_toks or not dt or amt is None:          # amt None -> not-yet-executed future row
+            continue
+        try:
+            coupon = round(_parse_coupon(' '.join(cpn_toks)), 4)
+        except Exception:
+            continue
+        method = ('Syndication' if 'Syndication' in toks else 'Tender' if 'Tender' in toks else 'Auction')
+        rows.append({"date": pd.to_datetime(dt, format='%d-%b-%Y'), "coupon": coupon,
+                     "mat": mat, "amt_mn": amt, "method": method})
+    return rows
+
+
+def parse_uk_d5d(folder="gilt_issuance", write=True):
+    """Parse every UK DMO D5D PDF in `folder` -> cache_intl/auctions_raw/GB.csv (new issues + reopenings
+    for the in-universe UKTI linkers). Coupon+maturity -> ISIN; first sale per gilt = new, rest = taps."""
+    u = linkers.load_universe()
+    uk = u[u["market"] == "UK_3M"].copy()
+    uk["y"] = pd.to_datetime(uk["maturity"]).dt.year
+    isin_of = {(round(float(c), 4), int(y)): i for c, y, i in zip(uk["cpn"], uk["y"], uk["isin"])}
+    ops, unmatched = [], set()
+    for f in sorted(glob.glob(os.path.join(folder, "*.pdf"))):
+        for r in _parse_d5d_pdf(f):
+            isin = isin_of.get((r["coupon"], r["mat"]))
+            if isin is None:
+                unmatched.add((r["coupon"], r["mat"])); continue
+            ops.append({**r, "isin": isin})
+    if not ops:
+        print(f"  no index-linked gilt ops parsed from {folder}/*.pdf"); return pd.DataFrame()
+    df = pd.DataFrame(ops).drop_duplicates(subset=["isin", "date"]).sort_values(["isin", "date"])
+    first = df.groupby("isin")["date"].transform("min")
+    df["reopening"] = df["date"] != first
+    df["event_type"] = [("reopening" if re else m.lower()) for re, m in zip(df["reopening"], df["method"])]
+    out = pd.DataFrame({"isin": df["isin"], "event_date": df["date"].dt.strftime("%Y-%m-%d"),
+                        "settle_date": "", "event_type": df["event_type"],
+                        "amount": (df["amt_mn"] * 1e6).round(0), "price": pd.NA, "yield": pd.NA,
+                        "reopening": df["reopening"]})
+    if write:
+        os.makedirs(RAW, exist_ok=True)
+        out.to_csv(os.path.join(RAW, "GB.csv"), index=False)
+    print(f"  GB.csv: {len(out)} events ({int((~out['reopening']).sum())} new, {int(out['reopening'].sum())} reopenings) "
+          f"for {out['isin'].nunique()} gilts, {df['date'].dt.year.min()}-{df['date'].dt.year.max()}")
+    if unmatched:
+        print(f"  skipped {len(unmatched)} matured/out-of-universe IL lines (e.g. {sorted(unmatched)[:5]})")
+    return out
 
 CACHE = linkers.CACHE
 RAW = os.path.join(CACHE, "auctions_raw")
@@ -221,6 +312,8 @@ if __name__ == "__main__":
         print(from_static().to_string())
     elif cmd == "reopenings":
         pull_reopenings()
+    elif cmd == "uk_d5d":
+        parse_uk_d5d(sys.argv[2] if len(sys.argv) > 2 else "gilt_issuance")
     elif cmd == "dmo":
         d = load_dmo()
         print(d.to_string() if not d.empty else "  no DMO CSVs in cache_intl/auctions_raw/")
