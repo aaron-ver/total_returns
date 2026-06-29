@@ -140,18 +140,19 @@ def _read_one(path):
         print(f"    !! {os.path.basename(path)}: missing ISIN or Maturity column "
               f"(add ISIN via Column Settings)"); return pd.DataFrame()
     cc = _find_col(df.columns, "coupon", "cpn", exclude=("type", "freq", "frq", "dt", "date"))
-    cd = _find_col(df.columns, "issue", exclude=("size", "amt", "px", "price"))
+    cd = (_find_col(df.columns, "issue date", "issue dt")
+          or _find_col(df.columns, "issue", exclude=("amount", "amt", "size", "px", "price")))
     ct = _find_col(df.columns, "ticker")
     ca = _find_col(df.columns, "amt", "amount")
     out = pd.DataFrame()
     out["isin"] = df[ci].astype(str).str.strip().str.upper()
     out["coupon"] = pd.to_numeric(df[cc], errors="coerce") if cc else pd.NA
-    out["maturity"] = pd.to_datetime(df[cm], errors="coerce")
-    out["issue_date"] = pd.to_datetime(df[cd], errors="coerce") if cd else pd.NaT
+    out["maturity"] = _dates(df[cm])
+    out["issue_date"] = _dates(df[cd]) if cd else pd.NaT
     out["ticker"] = df[ct].astype(str).str.strip() if ct else ""
     out["amt_issued"] = (pd.to_numeric(df[ca].astype(str).str.replace(",", "", regex=False), errors="coerce")
                          if ca else pd.NA)
-    out = out[out["isin"].apply(lambda x: bool(ISIN_RE.match(x)))]
+    out = out[out["isin"].astype(str).str.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")]
     return out
 
 
@@ -203,12 +204,42 @@ def load():
     return u
 
 
-def pull(skip_existing=True):
+def needed_isins():
+    """The nominals the contemporaneous matcher ACTUALLY selects (via cmt_intl.held_monthly) — pull
+    just these (~99) instead of the whole 946-bond universe; picks are identical since the matcher
+    only ever holds the closest-maturity nominal per held linker per month."""
+    import cmt_intl as cmt                                     # lazy: avoid circular import
+    u = load()
+    if u.empty:
+        return []
+    lu = linkers.load_universe(include_deferred=True)
+    lmat = {i: pd.Timestamp(m) for i, m in zip(lu["isin"], pd.to_datetime(lu["maturity"]))}
+    pools = {c: [(r["isin"], pd.Timestamp(r["maturity"]), pd.Timestamp(r["issue_date"]))
+                 for _, r in g.iterrows() if pd.notna(r["maturity"]) and pd.notna(r["issue_date"])]
+             for c, g in u.groupby("country")}
+    MK = {"IT_BTPEI": "IT", "FR_OATEI": "FR", "FR_OATI": "FR", "ES_EI": "ES", "UK_3M": "GB", "DE_EI": "DE"}
+    sel = set()
+    for m, c in MK.items():
+        pl = pools.get(c, [])
+        if not pl:
+            continue
+        for b, ser in cmt.held_monthly(m).items():
+            for mp, li in ser.dropna().items():
+                lm = lmat.get(li); ms = mp.to_timestamp(); pe = ms - pd.Timedelta(days=1)
+                cands = [n for n in pl if n[2] <= pe and n[1] > ms]
+                if cands:
+                    sel.add(min(cands, key=lambda n: abs((n[1] - lm).days))[0])
+    return sorted(sel)
+
+
+def pull(skip_existing=True, needed_only=False):
     u = load()
     if u.empty:
         print("  nominal_universe.csv is empty — run `import` first"); return
-    isins = sorted(u["isin"])
-    print(f"  pulling {len(isins)} nominal bonds (daily+static, skip_existing={skip_existing}) ...")
+    isins = needed_isins() if needed_only else sorted(u["isin"])
+    print(f"  pulling {len(isins)} nominal bonds "
+          f"({'matcher-selected only' if needed_only else 'full universe'}, "
+          f"daily+static, skip_existing={skip_existing}) ...")
     dl.pull_isins(isins, skip_existing=skip_existing)
 
 
@@ -228,7 +259,9 @@ if __name__ == "__main__":
     if cmd == "import":
         import_universe()
     elif cmd == "pull":
-        pull(skip_existing="--all" not in sys.argv)
+        pull(skip_existing="--fresh" not in sys.argv, needed_only="--needed" in sys.argv)
+    elif cmd == "needed":
+        ids = needed_isins(); print("\n".join(ids)); print(f"# {len(ids)} matcher-selected nominals")
     elif cmd == "status":
         status()
     else:
