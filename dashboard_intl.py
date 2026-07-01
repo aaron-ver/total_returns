@@ -24,6 +24,7 @@ import pandas as pd
 import linkers
 import buckets_intl as bk
 import seasonal_intl as sea
+import energy_intl as en
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = linkers.CACHE
@@ -135,6 +136,8 @@ input[type=range]{width:100%;accent-color:var(--accent);margin-top:3px}
     <button data-d="mean" class="on">Mean path</button><button data-d="box">Box/whisker</button></div></div>
   <div class="grp" id="sampgrp" style="display:none"><label>Sample window</label><div class="seg" id="samp">
     <button data-s="full" class="on">Full</button><button data-s="5y">5Y</button><button data-s="3y">3Y</button></div></div>
+  <div class="grp" id="energygrp" style="display:none"><label class="chk" style="text-transform:none;font-size:12px;color:var(--ink)"><input type="checkbox" id="energy"> Energy hedge (Brent)</label>
+    <div class="note" style="padding:2px 0 0">subtract h·Brent$; h = full‑sample crude β (contracts)</div></div>
   <div class="grp"><label>Metric</label><div class="seg" id="metric">
     <button data-m="be" class="on">Breakeven</button><button data-m="out">Outright</button></div></div>
   <div class="grp" id="betagrp"><label>Hedge β <span class="hl" id="bv">1.00</span></label>
@@ -155,7 +158,7 @@ const COLORS = ["#2f81f7","#3fb950","#e3b341","#f0883e","#db61a2","#a371f7","#56
                 "#7ee787","#ffa657","#bc8cff","#79c0ff","#d29922","#ff7b72","#39c5cf","#e6edf3"];
 const BORDER=["2y","5y","7y","10y","12y","15y","20y","25y","30y","40y","50y"];
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", cycw:10, samp:"full", cycdisp:"mean", beta:1, sel:{}};
+const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", cycw:10, samp:"full", cycdisp:"mean", beta:1, energy:false, sel:{}};
 
 function curItems(){
   const e=DATA[S.market];
@@ -189,10 +192,12 @@ function pctile(a,p){ if(!a.length) return null; const x=(a.length-1)*p/100, lo=
 function cycStats(obj){   // client-side per-offset distribution over taps in the sample window, at beta
   const offs=obj.offsets, cut=SEAS.sampcut[S.samp], evs=[];
   for(let e=0;e<obj.dates.length;e++){ if(!cut || obj.dates[e]>=cut) evs.push(e); }
+  const cB=obj.crudeB, hedge=S.energy && cB && obj.crude;   // Brent energy hedge (per-event crude path)
   const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:evs.length};
   for(let k=0;k<offs.length;k++){ const vals=[];
     for(const e of evs){ const o=obj.out[e][k], b=obj.be?obj.be[e][k]:null;
       let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
+      if(hedge){ const cr=obj.crude[e][k]; if(cr!=null){ const h=S.metric==="out"?cB[0]:(cB[0]-S.beta*cB[1]); v=v-h*cr/1e5; } }
       vals.push(v); }
     if(!vals.length){ ["mean","med","q1","q3","lo","hi"].forEach(s=>R[s].push(null)); continue; }
     vals.sort((a,b)=>a-b);
@@ -203,10 +208,12 @@ function cycStats(obj){   // client-side per-offset distribution over taps in th
 }
 function calStats(obj){   // client-side per-calendar-month distribution across years, in the window, at beta
   const cut=SEAS.sampcut[S.samp], cutm=cut?cut.slice(0,7):null, bym={}, yrs=new Set();
+  const cB=obj.crudeB, cm=SEAS.crude_monthly||{}, hedge=S.energy && cB;   // Brent energy hedge
   for(let mo=1;mo<=12;mo++) bym[mo]=[];
   for(let e=0;e<obj.ym.length;e++){ const y=obj.ym[e]; if(cutm && y<cutm) continue;
     const o=obj.out[e], b=obj.be?obj.be[e]:null;
     let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
+    if(hedge){ const cr=cm[y]; if(cr!=null){ const h=S.metric==="out"?cB[0]:(cB[0]-S.beta*cB[1]); v=v-h*cr/1e5; } }
     bym[+y.slice(5,7)].push(v); yrs.add(y.slice(0,4)); }
   const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:yrs.size};
   for(let mo=1;mo<=12;mo++){ const vals=bym[mo].slice().sort((a,b)=>a-b);
@@ -223,13 +230,14 @@ function render(){
   document.getElementById("dispgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
   document.getElementById("sampgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
   document.getElementById("betagrp").style.display = S.metric==="be"?"":"none";
+  document.getElementById("energygrp").style.display = (S.view==="cal"||S.view==="cycle")?"":"none";
   const sel=ensureSel(), items=curItems(); let traces=[], tot=[], any=false, anyMetric=false;
   items.forEach((it,i)=>{ const [k,lab,obj]=it, c=COLORS[i%COLORS.length];
     if(S.view==="cycle"){
       const st=cycStats(obj), has=st.mean.some(v=>v!=null); if(has) anyMetric=true; if(!sel.has(k)||!has) return; any=true;
       if(S.cycdisp==="box"){
         traces.push({type:"box",name:lab,x:obj.offsets,q1:st.q1,median:st.med,q3:st.q3,lowerfence:st.lo,upperfence:st.hi,mean:st.mean,
-          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,hoverinfo:"x+name",whiskerwidth:0.5});
+          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,whiskerwidth:0.5,hovertemplate:"%{x}<br>max %{upperfence}<br>q3 %{q3}<br>med %{median}<br>q1 %{q1}<br>min %{lowerfence}<br>mean %{mean}<extra>"+lab+"</extra>"});
         traces.push({x:obj.offsets,y:st.mean,name:lab+" mean",mode:"lines",type:"scatter",line:{color:c,width:1.6},showlegend:false,
           hovertemplate:"%{x} bd  mean <b>%{y}</b> bp<extra>"+lab+"</extra>"});
       }else{
@@ -241,7 +249,7 @@ function render(){
       const st=calStats(obj), has=st.mean.some(v=>v!=null); if(has) anyMetric=true; if(!sel.has(k)||!has) return; any=true;
       if(S.cycdisp==="box"){
         traces.push({type:"box",name:lab,x:MONTHS,q1:st.q1,median:st.med,q3:st.q3,lowerfence:st.lo,upperfence:st.hi,mean:st.mean,
-          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,hoverinfo:"x+name",whiskerwidth:0.5});
+          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,whiskerwidth:0.5,hovertemplate:"%{x}<br>max %{upperfence}<br>q3 %{q3}<br>med %{median}<br>q1 %{q1}<br>min %{lowerfence}<br>mean %{mean}<extra>"+lab+"</extra>"});
         traces.push({x:MONTHS,y:st.mean,name:lab+" mean",mode:"lines",type:"scatter",line:{color:c,width:1.6},showlegend:false,
           hovertemplate:"%{x}  mean <b>%{y}</b> bp<extra>"+lab+"</extra>"});
       }else{
@@ -261,8 +269,8 @@ function render(){
   document.getElementById("totals").innerHTML = any ? tot.slice(0,12).map(t=>
     `<div class="tot"><span class="lab" style="color:${t[2]}">${t[0]} <span style="color:var(--muted)">${totlab} · n=${t[3]}</span></span><b>${t[1]==null?"–":(t[1]>0?"+":"")+t[1]}</b> bp</div>`).join("") : "";
   const NOTES={cum:"Cumulative "+mlab()+". Buckets = constant-maturity (held bond rolls forward, contemporaneous nominal hedge β=1); By bond = per-issue. bp = $/100k-DV01.",
-    cycle:"Within-cycle path rebased to 0 on the auction day (x = trading days from the tap), EVENT-pooled around each of THIS bucket's taps (schedule-agnostic; gilts incl). Mean = avg across taps; Box = cross-tap distribution (median/quartiles, 10-90 whiskers, ◇ mean). Sample = full/5y/3y of taps.",
-    cal:"Per-calendar-month "+mlab()+" — Mean path or Box = distribution ACROSS YEARS for each month (median/quartiles, 10-90 whiskers, ◇ mean + line). Index-seasonality signature (euro-HICP / UK-RPI accrual); Sample filters the years; n = years; Σ yr ≈ mean annual."};
+    cycle:"Within-cycle path rebased to 0 on the auction day (x = trading days from the tap), EVENT-pooled around each of THIS bucket's taps (schedule-agnostic; gilts incl). Mean = avg across taps; Box = cross-tap distribution (median/quartiles, 10-90 whiskers, ◇ mean). Sample = full/5y/3y of taps. Energy hedge subtracts h·Brent (cumulative around each tap) to strip the crude-driven concession.",
+    cal:"Per-calendar-month "+mlab()+" — Mean path or Box = distribution ACROSS YEARS for each month. Index-seasonality signature (euro-HICP / UK-RPI accrual); Sample filters years; n=years; Σ yr ≈ mean annual. Energy hedge subtracts h·Brent (h = full-sample crude β, contracts) — see how much seasonality is just oil."};
   document.getElementById("note").textContent=NOTES[S.view];
   if(S.view==="cycle" && !SEAS.cycle[S.market]){ note("Auction-cycle needs a stable schedule — not available for "+DATA[S.market].label+" (gilts auction on scattered days / Germany has no comparator). Try Calendar."); return; }
   if(!any){ note("no "+mlab()+" series"+(anyMetric?" selected":" for this market (outright only)")); return; }
@@ -285,6 +293,7 @@ document.querySelectorAll("#cycwin button").forEach(b=>b.onclick=()=>{document.q
 document.querySelectorAll("#samp button").forEach(b=>b.onclick=()=>{setSeg("samp","s",b.dataset.s,"samp");render();});
 document.querySelectorAll("#cycdisp button").forEach(b=>b.onclick=()=>{setSeg("cycdisp","d",b.dataset.d,"cycdisp");render();});
 document.getElementById("beta").oninput=e=>{S.beta=+e.target.value; document.getElementById("bv").textContent=S.beta.toFixed(2); render();};
+document.getElementById("energy").onchange=e=>{S.energy=e.target.checked; render();};
 document.getElementById("all").onclick=()=>{ensureSel();curItems().forEach(it=>S.sel[selKey()].add(it[0]));buildSeriesList();render();};
 document.getElementById("none").onclick=()=>{S.sel[selKey()]=new Set();buildSeriesList();render();};
 const msel=document.getElementById("market");
@@ -300,6 +309,14 @@ def build(open_browser=True, path=None):
     if not payload:
         print("  no intl CMT/return caches found — run cmt_intl.py first"); return
     seas = sea.build()
+    try:                                                       # attach the Brent energy hedge (calendar view)
+        hm = en.hedge_map(); seas["crude_monthly"] = en.crude_monthly()
+        for grp in ("calendar", "cycle"):
+            for m, bs in seas.get(grp, {}).items():
+                for b, obj in bs.items():
+                    obj["crudeB"] = hm.get(m, {}).get(b)       # [bL, bN] full-sample crude betas, or None
+    except Exception as e:
+        print(f"  (energy hedge unavailable: {e})"); seas["crude_monthly"] = {}
     order = [m for m in MKT_ORDER if m in payload]
     html = (HTML.replace("__PLOTLY__", plotly_tag())
                 .replace("__PAYLOAD__", json.dumps(payload))

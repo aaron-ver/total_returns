@@ -40,6 +40,37 @@ def _load(market, bucket):
     return pd.read_parquet(p) if os.path.exists(p) else None
 
 
+_CRUDE = None
+def _crude_cum():
+    """Cumulative Brent $/contract series (cumsum of the built front-month usd_per_contract), indexed
+    by crude days — for the auction-cycle energy hedge. Empty Series if the crude cache is absent."""
+    global _CRUDE
+    if _CRUDE is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "crude_Brent.parquet")
+        if os.path.exists(p):
+            _CRUDE = pd.read_parquet(p)["usd_per_contract"].sort_index().cumsum()
+        else:
+            _CRUDE = pd.Series(dtype=float)
+    return _CRUDE
+
+
+def _crude_path(idx, apos, offs, n):
+    """Per-event cumulative Brent $/contract path over the window, rebased to 0 on the auction day
+    (asof-aligned to the bond offset dates). None if no crude cache."""
+    cc = _crude_cum()
+    if cc.empty:
+        return None
+    rows = []
+    for p in apos:
+        base = cc.asof(idx[p]); row = []
+        for k in offs:
+            j = p + k
+            lvl = cc.asof(idx[j]) if 0 <= j < n else np.nan
+            row.append(None if (pd.isna(lvl) or pd.isna(base)) else round(float(lvl - base), 1))
+        rows.append(row)
+    return rows
+
+
 WINDOWS = ["full", "5y", "3y"]                               # sample windows (like the US dashboard)
 
 
@@ -98,7 +129,8 @@ def auction_cycle(market, bucket, w=W):
     if out is None:
         return None
     return {"offsets": offs, "dates": [t.strftime("%Y-%m-%d") for t in d.index[apos]],
-            "out": out, "be": _leg_paths(d, "r_BE_bp", apos, offs, z, n)}
+            "out": out, "be": _leg_paths(d, "r_BE_bp", apos, offs, z, n),
+            "crude": _crude_path(d.index, apos, offs, n)}
 
 
 def calendar(market, bucket):
