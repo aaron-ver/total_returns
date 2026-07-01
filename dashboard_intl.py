@@ -107,6 +107,8 @@ h1{font-size:15px;margin:0 0 14px}
 .grp{margin-bottom:15px}
 .grp>label{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
 select{width:100%;background:#0f1722;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:7px}
+input[type=range]{width:100%;accent-color:var(--accent);margin-top:3px}
+.hl{color:var(--accent);font-variant-numeric:tabular-nums}
 .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{flex:1;background:transparent;color:var(--ink);border:0;padding:7px 4px;cursor:pointer;font-size:12px}
 .seg button.on{background:var(--accent);color:#fff}
@@ -127,8 +129,17 @@ select{width:100%;background:#0f1722;color:var(--ink);border:1px solid var(--lin
     <button data-v="cum" class="on">Cumulative</button><button data-v="cycle">Auction cycle</button><button data-v="cal">Calendar</button></div></div>
   <div class="grp" id="groupgrp"><label>Group by</label><div class="seg" id="group">
     <button data-g="buckets" class="on">Buckets</button><button data-g="bonds">By bond</button></div></div>
+  <div class="grp" id="cycwingrp" style="display:none"><label>Window (±trading days)</label><div class="seg" id="cycwin">
+    <button data-w="10" class="on">10</button><button data-w="15">15</button><button data-w="21">21</button></div></div>
+  <div class="grp" id="dispgrp" style="display:none"><label>Display</label><div class="seg" id="cycdisp">
+    <button data-d="mean" class="on">Mean path</button><button data-d="box">Box/whisker</button></div></div>
+  <div class="grp" id="sampgrp" style="display:none"><label>Sample window</label><div class="seg" id="samp">
+    <button data-s="full" class="on">Full</button><button data-s="5y">5Y</button><button data-s="3y">3Y</button></div></div>
   <div class="grp"><label>Metric</label><div class="seg" id="metric">
     <button data-m="be" class="on">Breakeven</button><button data-m="out">Outright</button></div></div>
+  <div class="grp" id="betagrp"><label>Hedge β <span class="hl" id="bv">1.00</span></label>
+    <input type="range" id="beta" min="0" max="1.5" step="0.05" value="1">
+    <div class="note" style="padding:2px 0 0">BE = linker − β·nominal (β=1 = equal DV01)</div></div>
   <div class="grp"><label id="serlab">Series</label>
     <div class="mini"><button id="all">All</button><button id="none">None</button></div>
     <div id="series"></div></div>
@@ -144,7 +155,7 @@ const COLORS = ["#2f81f7","#3fb950","#e3b341","#f0883e","#db61a2","#a371f7","#56
                 "#7ee787","#ffa657","#bc8cff","#79c0ff","#d29922","#ff7b72","#39c5cf","#e6edf3"];
 const BORDER=["2y","5y","7y","10y","12y","15y","20y","25y","30y","40y","50y"];
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", sel:{}};
+const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", cycw:10, samp:"full", cycdisp:"mean", beta:1, sel:{}};
 
 function curItems(){
   const e=DATA[S.market];
@@ -172,38 +183,96 @@ const LAY=()=>({paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6e
   xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zerolinecolor:"#3d4a58"}});
 function note(t){ Plotly.react("chart",[],{...LAY(),annotations:[{text:t,showarrow:false,font:{color:"#8b98a5",size:14},x:0.5,y:0.5,xref:"paper",yref:"paper"}]}); }
 const mlab=()=> S.metric==="be"?"breakeven":"outright";
+// breakeven at chosen beta from cumulative legs: BE(beta) = cum_linker - beta*cum_nominal = out - beta*(out-be)
+function beBeta(o,b){ return o.map((v,i)=> (v==null||!b||b[i]==null)?null : Math.round((v-S.beta*(v-b[i]))*100)/100); }
+function pctile(a,p){ if(!a.length) return null; const x=(a.length-1)*p/100, lo=Math.floor(x), hi=Math.ceil(x); return lo===hi?a[lo]:a[lo]+(a[hi]-a[lo])*(x-lo); }
+function cycStats(obj){   // client-side per-offset distribution over taps in the sample window, at beta
+  const offs=obj.offsets, cut=SEAS.sampcut[S.samp], evs=[];
+  for(let e=0;e<obj.dates.length;e++){ if(!cut || obj.dates[e]>=cut) evs.push(e); }
+  const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:evs.length};
+  for(let k=0;k<offs.length;k++){ const vals=[];
+    for(const e of evs){ const o=obj.out[e][k], b=obj.be?obj.be[e][k]:null;
+      let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
+      vals.push(v); }
+    if(!vals.length){ ["mean","med","q1","q3","lo","hi"].forEach(s=>R[s].push(null)); continue; }
+    vals.sort((a,b)=>a-b);
+    R.mean.push(Math.round(vals.reduce((a,b)=>a+b,0)/vals.length*100)/100);
+    R.med.push(pctile(vals,50)); R.q1.push(pctile(vals,25)); R.q3.push(pctile(vals,75)); R.lo.push(pctile(vals,10)); R.hi.push(pctile(vals,90));
+  }
+  return R;
+}
+function calStats(obj){   // client-side per-calendar-month distribution across years, in the window, at beta
+  const cut=SEAS.sampcut[S.samp], cutm=cut?cut.slice(0,7):null, bym={}, yrs=new Set();
+  for(let mo=1;mo<=12;mo++) bym[mo]=[];
+  for(let e=0;e<obj.ym.length;e++){ const y=obj.ym[e]; if(cutm && y<cutm) continue;
+    const o=obj.out[e], b=obj.be?obj.be[e]:null;
+    let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
+    bym[+y.slice(5,7)].push(v); yrs.add(y.slice(0,4)); }
+  const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:yrs.size};
+  for(let mo=1;mo<=12;mo++){ const vals=bym[mo].slice().sort((a,b)=>a-b);
+    if(!vals.length){ ["mean","med","q1","q3","lo","hi"].forEach(s=>R[s].push(null)); continue; }
+    R.mean.push(Math.round(vals.reduce((a,b)=>a+b,0)/vals.length*100)/100);
+    R.med.push(pctile(vals,50)); R.q1.push(pctile(vals,25)); R.q3.push(pctile(vals,75)); R.lo.push(pctile(vals,10)); R.hi.push(pctile(vals,90));
+  }
+  return R;
+}
 
 function render(){
   document.getElementById("groupgrp").style.display = S.view==="cum"?"":"none";
+  document.getElementById("cycwingrp").style.display = S.view==="cycle"?"":"none";
+  document.getElementById("dispgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
+  document.getElementById("sampgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
+  document.getElementById("betagrp").style.display = S.metric==="be"?"":"none";
   const sel=ensureSel(), items=curItems(); let traces=[], tot=[], any=false, anyMetric=false;
-  items.forEach((it,i)=>{ const [k,lab,obj]=it, y=obj[S.metric], c=COLORS[i%COLORS.length];
-    if(y) anyMetric=true; if(!sel.has(k)||!y) return; any=true;
+  items.forEach((it,i)=>{ const [k,lab,obj]=it, c=COLORS[i%COLORS.length];
     if(S.view==="cycle"){
-      traces.push({x:obj.offsets,y:y,name:lab,mode:"lines+markers",type:"scatter",line:{color:c,width:1.8},marker:{size:4},
-        hovertemplate:"%{x} bd  <b>%{y}</b> bp<extra>"+lab+"</extra>"});
-      tot.push([lab,y[y.length-1],c]);
+      const st=cycStats(obj), has=st.mean.some(v=>v!=null); if(has) anyMetric=true; if(!sel.has(k)||!has) return; any=true;
+      if(S.cycdisp==="box"){
+        traces.push({type:"box",name:lab,x:obj.offsets,q1:st.q1,median:st.med,q3:st.q3,lowerfence:st.lo,upperfence:st.hi,mean:st.mean,
+          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,hoverinfo:"x+name",whiskerwidth:0.5});
+        traces.push({x:obj.offsets,y:st.mean,name:lab+" mean",mode:"lines",type:"scatter",line:{color:c,width:1.6},showlegend:false,
+          hovertemplate:"%{x} bd  mean <b>%{y}</b> bp<extra>"+lab+"</extra>"});
+      }else{
+        traces.push({x:obj.offsets,y:st.mean,name:lab,mode:"lines+markers",type:"scatter",line:{color:c,width:1.8},marker:{size:4},
+          hovertemplate:"%{x} bd  <b>%{y}</b> bp<extra>"+lab+"</extra>"});
+      }
+      const wi=obj.offsets.indexOf(S.cycw); tot.push([lab, wi>=0?st.mean[wi]:null, c, st.n]);
     }else if(S.view==="cal"){
-      traces.push({x:MONTHS,y:y,name:lab,type:"bar",marker:{color:c},hovertemplate:"%{x}  <b>%{y}</b> bp<extra>"+lab+"</extra>"});
-      tot.push([lab,Math.round(y.reduce((a,v)=>a+(v||0),0)),c]);
+      const st=calStats(obj), has=st.mean.some(v=>v!=null); if(has) anyMetric=true; if(!sel.has(k)||!has) return; any=true;
+      if(S.cycdisp==="box"){
+        traces.push({type:"box",name:lab,x:MONTHS,q1:st.q1,median:st.med,q3:st.q3,lowerfence:st.lo,upperfence:st.hi,mean:st.mean,
+          marker:{color:c},line:{color:c},fillcolor:c+"22",boxmean:true,hoverinfo:"x+name",whiskerwidth:0.5});
+        traces.push({x:MONTHS,y:st.mean,name:lab+" mean",mode:"lines",type:"scatter",line:{color:c,width:1.6},showlegend:false,
+          hovertemplate:"%{x}  mean <b>%{y}</b> bp<extra>"+lab+"</extra>"});
+      }else{
+        traces.push({x:MONTHS,y:st.mean,name:lab,mode:"lines+markers",type:"scatter",line:{color:c,width:1.8},marker:{size:5},
+          hovertemplate:"%{x}  <b>%{y}</b> bp<extra>"+lab+"</extra>"});
+      }
+      tot.push([lab,Math.round(st.mean.reduce((a,v)=>a+(v||0),0)),c, st.n]);
     }else{
+      const y = S.metric==="out"? obj.out : beBeta(obj.out, obj.be);
+      const has=y && y.some(v=>v!=null); if(has) anyMetric=true; if(!sel.has(k)||!has) return; any=true;
       traces.push({x:obj.x,y:y,name:lab,mode:"lines",type:"scattergl",line:{color:c,width:1.6},connectgaps:false,
         hovertemplate:"%{x}  <b>%{y}</b> bp<extra>"+lab+"</extra>"});
-      let lv=null; for(let j=y.length-1;j>=0;j--){ if(y[j]!=null){lv=y[j];break;} } tot.push([lab,lv,c]);
+      let lv=null,cnt=0; for(let j=0;j<y.length;j++){ if(y[j]!=null){lv=y[j];cnt++;} } tot.push([lab,lv,c,cnt]);
     }
   });
-  const totlab = S.view==="cal"?"Σ yr":S.view==="cycle"?"+10bd":"latest";
+  const totlab = S.view==="cal"?"Σ yr":S.view==="cycle"?("+"+S.cycw+"bd"):"latest";
   document.getElementById("totals").innerHTML = any ? tot.slice(0,12).map(t=>
-    `<div class="tot"><span class="lab" style="color:${t[2]}">${t[0]} <span style="color:var(--muted)">${totlab}</span></span><b>${t[1]==null?"–":(t[1]>0?"+":"")+t[1]}</b> bp</div>`).join("") : "";
+    `<div class="tot"><span class="lab" style="color:${t[2]}">${t[0]} <span style="color:var(--muted)">${totlab} · n=${t[3]}</span></span><b>${t[1]==null?"–":(t[1]>0?"+":"")+t[1]}</b> bp</div>`).join("") : "";
   const NOTES={cum:"Cumulative "+mlab()+". Buckets = constant-maturity (held bond rolls forward, contemporaneous nominal hedge β=1); By bond = per-issue. bp = $/100k-DV01.",
-    cycle:"Mean within-cycle path, rebased to 0 on the auction day (x = trading days from the tap), EVENT-pooled around each tap so it works regardless of schedule (gilts incl). Down-then-up = concession into / snap-back after.",
-    cal:"Mean monthly "+mlab()+" by calendar month across years = index-seasonality signature (e.g. euro-HICP / UK-RPI accrual). Σ yr ≈ mean annual."};
+    cycle:"Within-cycle path rebased to 0 on the auction day (x = trading days from the tap), EVENT-pooled around each of THIS bucket's taps (schedule-agnostic; gilts incl). Mean = avg across taps; Box = cross-tap distribution (median/quartiles, 10-90 whiskers, ◇ mean). Sample = full/5y/3y of taps.",
+    cal:"Per-calendar-month "+mlab()+" — Mean path or Box = distribution ACROSS YEARS for each month (median/quartiles, 10-90 whiskers, ◇ mean + line). Index-seasonality signature (euro-HICP / UK-RPI accrual); Sample filters the years; n = years; Σ yr ≈ mean annual."};
   document.getElementById("note").textContent=NOTES[S.view];
   if(S.view==="cycle" && !SEAS.cycle[S.market]){ note("Auction-cycle needs a stable schedule — not available for "+DATA[S.market].label+" (gilts auction on scattered days / Germany has no comparator). Try Calendar."); return; }
   if(!any){ note("no "+mlab()+" series"+(anyMetric?" selected":" for this market (outright only)")); return; }
   const L=LAY();
   if(S.view==="cycle"){ L.xaxis.title="trading days from auction (0 = tap)"; L.yaxis.title="cum "+mlab()+" bp (rebased at auction)";
-    L.shapes=[{type:"line",x0:0,x1:0,y0:0,y1:1,yref:"paper",line:{color:"#8b98a5",dash:"dot",width:1}}]; }
-  else if(S.view==="cal"){ L.barmode="group"; L.hovermode="closest"; L.xaxis.title="calendar month"; L.yaxis.title="mean monthly "+mlab()+" (bp)"; }
+    L.shapes=[{type:"line",x0:0,x1:0,y0:0,y1:1,yref:"paper",line:{color:"#8b98a5",dash:"dot",width:1}}];
+    if(S.cycdisp==="box"){ L.boxmode="group"; L.hovermode="closest"; L.xaxis.range=[-S.cycw-0.6, S.cycw+0.6]; }
+    else { L.xaxis.range=[-S.cycw, S.cycw]; } }
+  else if(S.view==="cal"){ L.xaxis.title="calendar month"; L.yaxis.title="monthly "+mlab()+" (bp)";
+    L.hovermode = S.cycdisp==="box"?"closest":"x unified"; if(S.cycdisp==="box") L.boxmode="group"; }
   else { L.xaxis.type="date"; L.xaxis.rangeslider={visible:true,thickness:0.06,bgcolor:"#1b2430"}; L.yaxis.title="cumulative "+mlab()+" (bp)"; }
   Plotly.react("chart",traces,L,{responsive:true,displaylogo:false,modeBarButtonsToRemove:["lasso2d","select2d","autoScale2d"]});
 }
@@ -212,6 +281,10 @@ function setSeg(id,a,v,key){ document.querySelectorAll(`#${id} button`).forEach(
 document.querySelectorAll("#view button").forEach(b=>b.onclick=()=>{setSeg("view","v",b.dataset.v,"view");buildSeriesList();render();});
 document.querySelectorAll("#group button").forEach(b=>b.onclick=()=>{setSeg("group","g",b.dataset.g,"group");buildSeriesList();render();});
 document.querySelectorAll("#metric button").forEach(b=>b.onclick=()=>{setSeg("metric","m",b.dataset.m,"metric");render();});
+document.querySelectorAll("#cycwin button").forEach(b=>b.onclick=()=>{document.querySelectorAll("#cycwin button").forEach(x=>x.classList.toggle("on",x===b));S.cycw=+b.dataset.w;render();});
+document.querySelectorAll("#samp button").forEach(b=>b.onclick=()=>{setSeg("samp","s",b.dataset.s,"samp");render();});
+document.querySelectorAll("#cycdisp button").forEach(b=>b.onclick=()=>{setSeg("cycdisp","d",b.dataset.d,"cycdisp");render();});
+document.getElementById("beta").oninput=e=>{S.beta=+e.target.value; document.getElementById("bv").textContent=S.beta.toFixed(2); render();};
 document.getElementById("all").onclick=()=>{ensureSel();curItems().forEach(it=>S.sel[selKey()].add(it[0]));buildSeriesList();render();};
 document.getElementById("none").onclick=()=>{S.sel[selKey()]=new Set();buildSeriesList();render();};
 const msel=document.getElementById("market");
