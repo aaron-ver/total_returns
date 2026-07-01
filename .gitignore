@@ -25,3 +25,6 @@ Thumbs.db
 # Gilt Calendar
 /gilt_issuance
 /nominal_universe
+
+# Generated DB-ready marts (regenerable via marts.py)
+/marts
