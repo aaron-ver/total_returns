@@ -181,6 +181,16 @@ def import_universe():
     tick = u["ticker"].astype(str).str.lower()
     u = u[~(tick.str.contains("i ", na=False) | tick.str.contains("€i", na=False)
             | tick.str.contains("i/l", na=False) | tick.str.contains("ils", na=False))]
+    # final net: drop anything Bloomberg flags inflation-linked (catches same-ticker CPI linkers like
+    # BTP Italia, ref ITCPIUNR) using cached static where available (bonds without static are never
+    # used -- no daily -- and the runtime pool guard filters them regardless).
+    def _is_linker(i):
+        p = os.path.join(CACHE, "static", f"{i}.parquet")
+        if not os.path.exists(p):
+            return False
+        v = pd.read_parquet(p).iloc[0].get("INFLATION_LINKED_INDICATOR")
+        return isinstance(v, str) and v.strip().upper().startswith("Y")
+    u = u[~u["isin"].map(_is_linker)]
     dropped = n0 - len(u)
     u = u.dropna(subset=["maturity"]).drop_duplicates("isin").sort_values(["country", "maturity"]).reset_index(drop=True)
     if dropped:

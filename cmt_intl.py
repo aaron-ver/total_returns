@@ -219,10 +219,10 @@ def build_bucket(market, b, held_s, grid, auc, country, matof):
     """Splice the held linker leg (full history) + the CONTEMPORANEOUS nominal hedge (re-picked each
     month = closest-maturity nominal then existing) into the US breakeven format over a daily grid."""
     per = pd.Series(pd.Series(held_s).reindex(grid.to_period("M")).to_numpy(), index=grid)  # held linker/day
-    fv = per.first_valid_index()
-    if fv is None:
+    fv, lv = per.first_valid_index(), per.last_valid_index()   # trim leading + trailing dead space
+    if fv is None:                                             # (interior gaps stay flat per spec)
         return pd.DataFrame()
-    grid = grid[grid >= fv]; per = per.loc[grid]
+    grid = grid[(grid >= fv) & (grid <= lv)]; per = per.loc[grid]
     # LINKER leg (full per-bond history, spliced across rolls)
     parts = []
     for isin in pd.unique(per.dropna()):
