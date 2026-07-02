@@ -18,6 +18,7 @@ Usage:
   python redshift_intl.py xcols <schema.table>    # columns of any table (structure only)
   # --- run the MOMENT DRD grants read: proves which feeds are actually populated for us ---
   python redshift_intl.py coverage                # bond/inflation/repo/futures reality check vs our universe
+  python redshift_intl.py hunt                     # locate feeds that came back empty (where do bonds/CPI live?)
 
 If it hangs/times out: you're probably not on the corp VPN (the cluster is network-restricted).
 If it errors about SSL: set  $Env:REDSHIFT_SSL="true"  and retry.
@@ -184,6 +185,75 @@ def coverage():
             print("      ", " | ".join(str(x) for x in row))
 
 
+def hunt():
+    """Diagnose the feeds that came back EMPTY in `coverage`: find WHERE our govt bonds and
+    inflation indices actually live across the whole DB (or prove they're absent), and whether
+    the BBG futures generics exist vs. only dated contracts. Broad grants assumed. Read-only."""
+    import os
+    import pandas as pd
+
+    def _q(label, sql):
+        print(f"\n>>> {label}")
+        try:
+            _, rows = query(sql)
+            for row in rows:
+                print("    ", " | ".join("" if x is None else str(x) for x in row))
+            if not rows:
+                print("    (no rows)")
+        except Exception as e:
+            print(f"    [error] {type(e).__name__}: {str(e)[:120]}")
+
+    # sample a few of our ISINs (linker + nominal) to probe with
+    here = os.path.dirname(os.path.abspath(__file__))
+    ci = os.path.join(here, "cache_intl")
+    samp = []
+    for f in ("universe.csv", "nominal_universe.csv"):
+        p = os.path.join(ci, f)
+        if os.path.exists(p):
+            samp += pd.read_csv(p)["isin"].dropna().astype(str).tolist()[:3]
+    samp = [s for s in samp if s.isalnum()][:6]
+    print("sample ISINs:", ", ".join(samp))
+
+    # 0) THE BIG ONE: every table in the DB that has an ISIN or govt-yield column -> where bonds hide
+    _q("catalog-wide: tables carrying id_isin / yld_ytm (candidate bond-price tables)",
+       "select n.nspname||'.'||c.relname, a.attname from pg_attribute a "
+       "join pg_class c on a.attrelid=c.oid join pg_namespace n on c.relnamespace=n.oid "
+       "where a.attname in ('id_isin','isin','yld_ytm_mid','yld_ytm_bid','yield') "
+       "and c.relkind in ('r','v') and n.nspname not like 'pg_%' and n.nspname<>'information_schema' "
+       "order by 1")
+
+    # 1) BONDS: what IS in bloomberg_prices.prices, and do our ISINs appear anywhere in it?
+    _q("bloomberg_prices.prices -> asset-class mix (market_sector_des)",
+       "select market_sector_des, count(*) n from bloomberg_prices.prices group by 1 order by n desc limit 12")
+    if samp:
+        likes = " or ".join(f"id_isin like '{s}%'" for s in samp)
+        _q("bloomberg_prices.prices -> probe our sample ISINs (LIKE catches trailing spaces)",
+           f"select id_isin, ticker, security_typ, market_sector_des, record_date, px_last "
+           f"from bloomberg_prices.prices where {likes} limit 10")
+
+    # 2) INFLATION: hunt CPI/RPI/HICP tickers wherever they are; show what index_prices holds
+    for tbl, col in (("bloomberg_per_security.index_prices", "ticker"),
+                     ("bloomberg_per_security.index_prices_historical", "ticker"),
+                     ("bloomberg_fi_indices.top_level_values", "bbgticker")):
+        _q(f"{tbl} -> CPI/RPI/HICP search ({col})",
+           f"select distinct {col} from {tbl} where {col} ilike '%CPTFEMU%' or {col} ilike '%FRCPXTOB%' "
+           f"or {col} ilike '%UKRPI%' or {col} ilike '%HICP%' or {col} ilike '%CPI%' or {col} ilike '%RPI%' "
+           f"order by 1 limit 25")
+    _q("bloomberg_per_security.index_prices -> what tickers ARE in here (sample)",
+       "select ticker, count(*) n from bloomberg_per_security.index_prices group by 1 order by n desc limit 12")
+
+    # 3) FUTURES: do BBG generics exist, or only dated contracts (need to rebuild the roll)?
+    for tbl in ("bloomberg_futures_prices.futures_prices_nonshare",
+                "bloomberg_futures_prices.futures_prices_share"):
+        _q(f"{tbl} -> BBG generic front/second tickers (CL1/CO1/XB1 ...)?",
+           f"select ticker, count(*) n, min(settle_dt), max(settle_dt) from {tbl} where "
+           f"ticker in ('CL1','CL2','CO1','CO2','XB1','XB2') or ticker ilike 'CL_ Comdty' "
+           f"or ticker ilike 'CO_ Comdty' or ticker ilike 'XB_ Comdty' group by 1 order by n desc limit 12")
+        _q(f"{tbl} -> Brent(CO)/RBOB(XB) dated contracts present?",
+           f"select ticker, count(*) n from {tbl} where ticker similar to 'CO[FGHJKMNQUVXZ][0-9]%' "
+           f"or ticker similar to 'XB[FGHJKMNQUVXZ][0-9]%' group by 1 order by n desc limit 10")
+
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -203,6 +273,8 @@ if __name__ == "__main__":
             xcols(sys.argv[2])
         elif cmd == "coverage":
             coverage()
+        elif cmd == "hunt":
+            hunt()
         elif cmd == "sql":
             c, r = query(sys.argv[2], limit=1000)
             print(" | ".join(c))

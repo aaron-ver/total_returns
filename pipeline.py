@@ -16,6 +16,12 @@ Usage:
   python pipeline.py --no-pull --stage render   # e.g. just regenerate the dashboards
   python pipeline.py --verbose       # print full tracebacks on failures
 S3 push is OPT-IN (--push or --stage push); a plain run never touches S3.
+
+SPLIT MODE — decouple the (terminal-bound) pull from the (run-anywhere) compile, with S3 in between:
+  python pipeline.py --pull-only     # TERMINAL box: BBG pull -> upload RAW cache to S3, nothing else
+  python pipeline.py --from-s3       # CLOUD/any box: download RAW cache from S3 -> build/export/render
+  python pipeline.py --from-s3 --push  #   ...and publish the artifacts back to S3
+This is how the data lives in S3 (not one machine) and the heavy compile runs headless off-terminal.
 """
 from __future__ import annotations
 import sys, time, traceback
@@ -23,6 +29,10 @@ import sys, time, traceback
 NO_PULL = "--no-pull" in sys.argv
 VERBOSE = "--verbose" in sys.argv
 PUSH = "--push" in sys.argv          # S3 sync is OPT-IN: a plain run stays fully local
+PULL_ONLY = "--pull-only" in sys.argv   # terminal box: pull from BBG + upload raw cache to S3
+FROM_S3 = "--from-s3" in sys.argv       # cloud/any box: download raw cache from S3, then build (no terminal)
+if FROM_S3:
+    NO_PULL = True                   # no terminal off-box; the data comes from S3 instead
 STAGE = "all"
 if "--stage" in sys.argv:
     i = sys.argv.index("--stage")
@@ -100,6 +110,20 @@ def stage_push():
     run("S3 artifact sync", storage.push)
 
 
+def stage_pushraw():
+    """Upload the raw pulled caches to S3 (terminal box, right after the pull)."""
+    print("\n== PUSH RAW (cache -> S3) ==")
+    import storage
+    run("S3 raw-cache upload", storage.push_raw)
+
+
+def stage_pullraw():
+    """Download the raw caches from S3 (cloud/any box, before build) — no terminal needed."""
+    print("\n== PULL RAW (S3 -> cache) ==")
+    import storage
+    run("S3 raw-cache download", storage.pull_raw)
+
+
 def stage_alerts():
     print("\n== ALERTS ==")
     import alerts
@@ -107,12 +131,19 @@ def stage_alerts():
 
 
 STAGES = {"pull": stage_pull, "build": stage_build, "export": stage_export,
-          "render": stage_render, "push": stage_push, "alerts": stage_alerts}
+          "render": stage_render, "push": stage_push, "alerts": stage_alerts,
+          "pushraw": stage_pushraw, "pullraw": stage_pullraw}
 
 
 def main():
     t0 = time.time()
-    if STAGE == "all":
+    if PULL_ONLY:                     # TERMINAL box: pull from BBG, upload raw to S3, stop
+        order = ["pull", "pushraw"]
+    elif FROM_S3:                     # CLOUD/any box: get raw from S3, compile, (optionally) publish
+        order = ["pullraw", "build", "export", "render", "alerts"]
+        if PUSH:
+            order.insert(order.index("alerts"), "push")
+    elif STAGE == "all":
         order = ["pull", "build", "export", "render", "alerts"]   # local only by default
         if PUSH:
             order.insert(order.index("alerts"), "push")           # S3 sync only with --push

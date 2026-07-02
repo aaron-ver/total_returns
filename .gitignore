@@ -28,3 +28,6 @@ Thumbs.db
 
 # Generated DB-ready marts (regenerable via marts.py)
 /marts
+
+# Scheduled-run logs (run_daily.ps1)
+/logs

@@ -43,7 +43,21 @@ stay a scraper / manual upload. This is the map for automating the daily refresh
 from cache (no terminal). Later: EventBridge cron → Fargate for BUILD/EXPORT/RENDER; the terminal box
 (or Redshift) feeds PULL; a Lambda runs `alerts.py`.
 
+## Redshift verification — DRD `rome-prod` / `drd` DB (checked 2026‑07 via `redshift_intl.py coverage`/`hunt`)
+**Verdict: DRD Redshift is an *equities* warehouse. The core linker feeds are NOT in it, so the Bloomberg terminal box stays the pull node.**
+
+| Our feed | In Redshift? | Table | Notes |
+|---|---|---|---|
+| Linker + nominal px/yield (rows 1,7,11) | ❌ **No** | — | `bloomberg_prices.prices` = 3.08B rows, **100% `market_sector_des='Equity'`**; 0/1028 of our ISINs present. Catalog‑wide scan of every `id_isin`/`yld_ytm` table shows **no sovereign cash‑bond price table** anywhere (only equities/ETF/risk‑model/CDS/options/preferreds). → **stays BBG‑DAPI (terminal).** |
+| Inflation indices CPTFEMU/FRCPXTOB/UKRPI (rows 2,8) | ❌ **No** | — | `bloomberg_per_security.index_prices` is a curated commodity/index subscription list (HO1, SM1, HRC2, …) — **no CPI/HICP/RPI**. `index_prices_historical` + `bloomberg_fi_indices` are permission‑denied; even if granted, these are 3 monthly series → keep on terminal. |
+| Bond static (coupon/maturity/dated) | ❌ **No** | — | Only equity secmasters + `golden_copy` (identifiers only, no coupon/maturity). → stays BBG‑DAPI (already cached, changes only on new issues). |
+| GC financing €STR/SONIA/EONIA (rows 3,9) | ✅ **Yes** | `bloomberg_fixings.fixings` | Names `Interest:Fixing:EUR:ESTR:1D`, `…:GBP:SONIA:1D`, `…:EUR:EONIA:1D`, `closename='Official'`. No secured GC‑pool/RepoFunds (we already fall back to €STR/SONIA). |
+| Crude/RBOB futures (rows 5,6) | ✅ **Yes (dated only)** | `bloomberg_futures_prices.futures_prices_{nonshare,share}` | No BBG generics (CL1/CO1/XB1). WTI `CL*` + RBOB `XB*` clean in `nonshare`; Brent `CO*` only in `share` in Refinitiv‑RIC form (`COM7=Z0`). Would need front‑month roll reconstructed from dated contracts via `bloomberg_futures.futures` metadata. |
+
+**Consequence:** a fully headless cloud cron pulling everything from Redshift is **not achievable** — the backbone (sovereign linker/nominal prices) isn't there. The terminal box must run the daily pull regardless. Redshift's realistic role: optional **secondary/backfill source** for fixings + energy only.
+
 ## Migration notes (when AWS/Redshift land)
-- Point the **BBG‑DAPI** modules (rows 1‑3,5‑9,11) at a Redshift adapter — one seam per data‑layer module. **Verify rows 8‑9** are actually in the Redshift BBG feed; if not they stay DAPI/manual.
+- ~~Point the BBG‑DAPI modules at a Redshift adapter~~ — **superseded by the verification above.** Only rows 3/9 (fixings) and 5/6 (crude/RBOB, with roll reconstruction) are sourceable from DRD; rows 1‑2,7,8,11 + static stay BBG‑DAPI on the terminal box.
+- **Automate the pull on the terminal box** (Windows Task Scheduler → `pipeline.py --push`), not a headless Lambda. Everything downstream of PULL (build/export/render/push) is already cloud‑runnable from cache.
 - Rows 4,15 are already parse‑from‑source (cloud‑runnable). Rows 10,12‑16 stay **manual → S3 inbox**.
 - Swap local artifact paths for `s3://` in one `write_artifact()` helper; date‑partition drops for reproducibility/audit.
