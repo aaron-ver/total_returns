@@ -144,7 +144,7 @@ input[type=range]{width:100%;accent-color:var(--accent);margin-top:3px}
 .tot b{font-size:16px}.tot .lab{color:var(--muted);font-size:11px;display:block}
 #chart{flex:1;min-height:0}
 .note{color:var(--muted);font-size:11px;padding:8px 18px}
-#stats{padding:2px 18px 8px}
+#stats{padding:2px 18px 8px;max-height:34vh;overflow:auto}
 table.stt{border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12px}
 table.stt th,table.stt td{padding:3px 14px;text-align:right;border-bottom:1px solid var(--line)}
 table.stt th{color:var(--muted);font-weight:600}
@@ -362,10 +362,14 @@ function render(){
     + statsRows.map(r=>`<tr><td style='color:${r[1]}'>${r[0]}</td><td>${r[2].annret>0?'+':''}${r[2].annret}</td><td>${r[2].annvol}</td><td>${r[2].sharpe==null?'–':r[2].sharpe}</td><td>${r[2].mdd}</td><td>${r[2].hit}</td></tr>`).join("")
     + "</table><div class='note' style='padding:2px 0 0'>annualized from weekly bp (rf=0); max DD in bp; over the date‑range window, rebased to 0 at start</div>";
   } else if(S.view==="cycle" && S.cycdisp==="regress" && regRows.length){
-    statsEl.innerHTML = "<table class='stt'><tr><th>bucket</th><th>transition</th><th>β</th><th>R²</th><th>t</th><th>n</th></tr>"
-    + regRows.map(r=>{const o=r[3], f=(o&&o.n<8)?" ⚠":"", hl=r[2]===S.regpair?";background:#243040":"";
-      return `<tr onclick="setRegPair('${r[2]}')" style="cursor:pointer${hl}"><td style='color:${r[1]}'>${r[0]}</td><td>${r[2].replace(">","→")}</td><td>${o?o.beta.toFixed(2):'–'}</td><td>${o?o.r2.toFixed(2):'–'}</td><td>${(o&&o.t!=null)?o.t.toFixed(1):'–'}</td><td>${o?o.n:0}${f}</td></tr>`;}).join("")
-    + "</table><div class='note' style='padding:2px 0 0'>Click a row to plot that regression (current: "+S.regpair.replace(">","→")+"). Periods P1:−10→−5, P2:−5→0, P3:0→+5, P4:+5→+10 td. β/R²/t of predicting the later period from the earlier across taps; ⚠ n<8 (thin).</div>";
+    const rowH = r=>{const o=r[3], f=(o&&o.n<8)?" ⚠":"", hl=r[2]===S.regpair?";background:#243040":"";
+      return `<tr onclick="setRegPair('${r[2]}')" style="cursor:pointer${hl}"><td style='color:${r[1]}'>${r[0]}</td><td>${r[2].replace(">","→")}</td><td>${o?o.beta.toFixed(2):'–'}</td><td>${o?o.r2.toFixed(2):'–'}</td><td>${(o&&o.t!=null)?o.t.toFixed(1):'–'}</td><td>${o?o.n:0}${f}</td></tr>`;};
+    const tbl = rows=>"<table class='stt'><tr><th>bkt</th><th>trans</th><th>β</th><th>R²</th><th>t</th><th>n</th></tr>"+rows.map(rowH).join("")+"</table>";
+    const blk=[]; for(let i=0;i<regRows.length;i+=3) blk.push(regRows.slice(i,i+3));   // 3 rows per bucket
+    const ncol = blk.length<=3?1:(blk.length<=6?2:3), per=Math.ceil(blk.length/ncol);
+    let cols=""; for(let ci=0;ci<ncol;ci++) cols += tbl([].concat(...blk.slice(ci*per,(ci+1)*per)));
+    statsEl.innerHTML = "<div style='display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start'>"+cols+"</div>"
+      + "<div class='note' style='padding:2px 0 0'>Click a row to plot that regression (current: "+S.regpair.replace(">","→")+"). P1:−10→−5, P2:−5→0, P3:0→+5, P4:+5→+10 td. β/R²/t predict the later period from the earlier across taps; ⚠ n<8 (thin).</div>";
   } else { statsEl.innerHTML=""; }
   const totlab = S.view==="cal"?"Σ yr":S.view==="cycle"?("+"+S.cycw+"bd"):"latest";
   document.getElementById("totals").innerHTML = any ? tot.slice(0,12).map(t=>
