@@ -1,0 +1,78 @@
+"""
+Central config for the breakeven RV study: paths, tickers, model parameters.
+
+Everything downstream imports from here so a parameter change happens in ONE place.
+Run convention: all modules run from the repo root (so root modules bbg.py /
+data_layer.py are importable), e.g.  python -m breakeven_rv.run_all build
+"""
+from __future__ import annotations
+import os
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(DIR)                      # repo root (total_returns)
+CACHE = os.path.join(DIR, "cache")               # gitignored
+REPORTS = os.path.join(DIR, "reports")           # md tracked; csv/figures gitignored
+FIGURES = os.path.join(REPORTS, "figures")
+
+ROOT_CACHE = os.path.join(ROOT, "cache")         # the existing repo cache (energy, macro, per-bond daily)
+
+START = "20040101"                               # BBG pull start (swap data begins ~2004)
+
+# --- Bloomberg series (terminal / DAPI, via root bbg.py) -------------------
+# Zero-coupon USD CPI swaps (the derivative inflation curve; Residual B + swap-space FV target)
+SWAP_TENORS = [1, 2, 3, 5, 7, 10, 15, 20, 30]
+BBG_SERIES = {
+    **{f"swap_{t}y": (f"USSWIT{t} Curncy", "PX_LAST") for t in SWAP_TENORS},
+    "be5":    ("USGGBE05 Index", "PX_LAST"),   # constant-maturity TIPS breakevens (BBG generic)
+    "be10":   ("USGGBE10 Index", "PX_LAST"),
+    "be30":   ("USGGBE30 Index", "PX_LAST"),
+    "real5":  ("USGGT05Y Index", "PX_LAST"),   # constant-maturity TIPS real yields
+    "real10": ("USGGT10Y Index", "PX_LAST"),
+    "real30": ("USGGT30Y Index", "PX_LAST"),
+    "move":   ("MOVE Index", "PX_LAST"),       # rates implied vol (stress conditioning)
+    "bbdxy":  ("BBDXY Index", "PX_LAST"),      # Bloomberg USD spot index (traded, unrevised; from Dec-2004)
+}
+
+# --- FRED series (no key needed; fredgraph csv endpoint) --------------------
+FRED_SERIES = {
+    "dgs3m":      "DGS3MO",    # nominal curve points (H.15, effectively unrevised)
+    "dgs2":       "DGS2",
+    "dgs5":       "DGS5",
+    "dgs10":      "DGS10",
+    "dgs30":      "DGS30",
+    "vix":        "VIXCLS",
+    "usd_broad":  "DTWEXBGS",  # Fed broad trade-weighted USD (daily from 2006; annual weight revisions)
+    "be10_fred":  "T10YIE",    # cross-checks of the BBG CM breakevens
+    "be5_fred":   "T5YIE",
+    "real10_fred": "DFII10",
+}
+
+# --- TreasuryDirect auction pull --------------------------------------------
+TD_API = "https://www.treasurydirect.gov/TA_WS/securities/search"
+TD_START_YEAR = 2003
+MIN_AUCTION_SIZE = 1_000_000_000   # below this, contingency/test auction (mirrors root auctions.py)
+TENOR_MAP = {"5-Year": "5y", "10-Year": "10y", "30-Year": "30y"}
+
+# --- Model parameters --------------------------------------------------------
+L1_WINDOW = 504          # rolling OLS window (~2y of business days; Barclays OOS sweet spot)
+L1_HALFLIFE = 252        # EWLS variant half-life (~1y)
+Z_WINDOW = 504           # z-score window (same-window residual vol, per plan §7)
+Z_MIN_PERIODS = 252
+L1_FACTORS = ["slope_3m10y", "log_gas", "vix", "log_usd"]     # Barclays four-factor baseline
+L1_LASSO_FACTORS = L1_FACTORS + ["slope_2s10s", "move", "gcf_repo", "cpi_yoy_lagged", "dgs10"]
+
+HORIZONS = [5, 10, 20]   # forward residual-change horizons (business days)
+Z_THRESHOLD = 1.0        # |z| beyond this = "cheap"/"rich" for quadrant + auction buckets
+
+AUCTION_LAG = (10, 5)    # residual measured as mean over t-10..t-5 bd before auction (pre-concession)
+POST_HORIZONS = [1, 3, 5]  # post-auction performance windows (business days)
+
+# CPI publication lag: the CPI print for month m is released ~day 10-13 of m+1.
+# Conservative rule used for vintage discipline: value for month m becomes known
+# on the 15th calendar day of m+1 (first business day on/after).
+CPI_PUB_DAY = 15
+
+
+def ensure_dirs():
+    for d in (CACHE, REPORTS, FIGURES):
+        os.makedirs(d, exist_ok=True)

@@ -35,3 +35,9 @@ Thumbs.db
 # Experiment outputs + experiment-only pulls (code in experiments/ IS tracked)
 /experiments/out
 /experiments/cache
+
+# Breakeven RV study: cached pulls + generated outputs (code + docs ARE tracked)
+/breakeven_rv/cache
+/breakeven_rv/reports/figures
+/breakeven_rv/reports/*.parquet
+/breakeven_rv/reports/*.csv
