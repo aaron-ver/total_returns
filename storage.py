@@ -16,7 +16,7 @@ Usage:       python storage.py            # push consumable ARTIFACTS to S3 (mar
              python storage.py pull-raw   # CLOUD/any box: download raw caches so BUILD can run without a terminal
 """
 from __future__ import annotations
-import os, sys, glob
+import os, sys, glob, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUCKET = os.environ.get("LINKERS_S3_BUCKET")
@@ -52,28 +52,52 @@ def _key(*parts):
     return "/".join(p for p in ([PREFIX] + [x for x in parts if x]) if p)
 
 
+def _put_if_changed(cli, path, key, extra=None):
+    """Upload only when the object is missing or its content differs (size + MD5 vs the S3 ETag),
+    so a daily sync re-sends just the handful of files that actually changed. Returns True if it
+    uploaded, False if it skipped an identical object."""
+    try:
+        h = cli.head_object(Bucket=BUCKET, Key=key)
+        etag = h.get("ETag", "").strip('"')
+        if h.get("ContentLength") == os.path.getsize(path) and "-" not in etag:
+            with open(path, "rb") as fh:
+                if hashlib.md5(fh.read()).hexdigest() == etag:
+                    return False  # byte-identical already in S3 -> skip
+    except Exception:
+        pass  # not present (or HEAD failed) -> upload
+    cli.upload_file(path, BUCKET, key, ExtraArgs=extra or {})
+    return True
+
+
 def push():
     if not enabled():
         print("  [storage] S3 not configured (set LINKERS_S3_BUCKET + AWS creds, pip install boto3) — skipped")
         return 0
-    cli = _client(); total = 0
-    print(f"  [storage] sync -> s3://{BUCKET}/{PREFIX or ''}")
+    cli = _client(); up = skip = 0
+    print(f"  [storage] sync -> s3://{BUCKET}/{PREFIX or ''}  (incremental: only changed files)")
     for d, sub in DIRS.items():
         base = os.path.join(HERE, d)
         if not os.path.isdir(base):
             continue
-        n = 0
+        u = s = 0
         for path in glob.glob(os.path.join(base, "**", "*"), recursive=True):
             if os.path.isfile(path):
                 rel = os.path.relpath(path, base).replace("\\", "/")
-                cli.upload_file(path, BUCKET, _key(sub, rel)); n += 1
-        total += n; print(f"    {d:10s} -> {sub}/  ({n} files)")
+                if _put_if_changed(cli, path, _key(sub, rel)): u += 1
+                else: s += 1
+        up += u; skip += s; print(f"    {d:10s} -> {sub}/  ({u} changed, {s} unchanged)")
     for f, key in FILES.items():
         p = os.path.join(HERE, f)
         if os.path.isfile(p):
-            cli.upload_file(p, BUCKET, _key(key)); total += 1; print(f"    {f} -> {key}")
-    print(f"  [storage] uploaded {total} files")
-    return total
+            # no-cache => the browser revalidates every visit, so a shared link always shows the
+            # latest daily build instead of a stale cached copy.
+            extra = {"ContentType": "text/html", "CacheControl": "no-cache"} if f.endswith(".html") else {}
+            if _put_if_changed(cli, p, _key(key), extra):
+                up += 1; print(f"    {f} -> {key}  (changed)")
+            else:
+                skip += 1; print(f"    {f} -> {key}  (unchanged)")
+    print(f"  [storage] uploaded {up} changed, skipped {skip} unchanged")
+    return up
 
 
 def identity():
@@ -118,20 +142,21 @@ def push_raw():
     after the Bloomberg pull, so a headless build elsewhere can source the same data."""
     if not enabled():
         print("  [storage] S3 not configured — skipped"); return 0
-    cli = _client(); total = 0
-    print(f"  [storage] push RAW -> s3://{BUCKET}/{_key('raw') or 'raw'}")
+    cli = _client(); up = skip = 0
+    print(f"  [storage] push RAW -> s3://{BUCKET}/{_key('raw') or 'raw'}  (incremental: only changed files)")
     for d, sub in RAW_DIRS.items():
         base = os.path.join(HERE, d)
         if not os.path.isdir(base):
             continue
-        n = 0
+        u = s = 0
         for path in glob.glob(os.path.join(base, "**", "*"), recursive=True):
             if os.path.isfile(path):
                 rel = os.path.relpath(path, base).replace("\\", "/")
-                cli.upload_file(path, BUCKET, _key(sub, rel)); n += 1
-        total += n; print(f"    {d:10s} -> {sub}/  ({n} files)")
-    print(f"  [storage] uploaded {total} raw files")
-    return total
+                if _put_if_changed(cli, path, _key(sub, rel)): u += 1
+                else: s += 1
+        up += u; skip += s; print(f"    {d:10s} -> {sub}/  ({u} changed, {s} unchanged)")
+    print(f"  [storage] uploaded {up} changed, skipped {skip} unchanged raw files")
+    return up
 
 
 def pull_raw():
@@ -158,8 +183,28 @@ def pull_raw():
     return total
 
 
+def url(key=None, days=7):
+    """Print a temporary browser link to a dashboard that RENDERS in-browser (no download). Valid up
+    to 7 days (the IAM-user max). This is the zero-infra way to share the private dashboard today;
+    for a permanent stable internal URL, front the bucket with CloudFront (cloud-team / Terraform)."""
+    if not enabled():
+        print("  [storage] S3 not configured — skipped"); return None
+    k = _key(key or "dashboards/dashboard_intl.html")
+    u = _client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": k,
+                "ResponseContentType": "text/html",          # force inline render, not download
+                "ResponseContentDisposition": "inline"},
+        ExpiresIn=int(min(days, 7) * 86400))
+    print(u)
+    return u
+
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     cmd = sys.argv[1] if len(sys.argv) > 1 else "push"
-    {"push": push, "push-raw": push_raw, "pull-raw": pull_raw, "identity": identity}.get(cmd, push)()
+    if cmd == "url":
+        url(sys.argv[2] if len(sys.argv) > 2 else None)
+    else:
+        {"push": push, "push-raw": push_raw, "pull-raw": pull_raw, "identity": identity}.get(cmd, push)()

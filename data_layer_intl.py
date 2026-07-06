@@ -217,6 +217,28 @@ def index_ratio_series(index_key, dated_date, settle_dates, lag_months=3, interp
 
 
 # --------------------------------------------------------------------------- per-bond pulls
+_EMPTY_FILE = os.path.join(CACHE, "daily_empty.txt")   # ISINs BBG confirmed have NO daily data (dead)
+
+
+def _load_empty():
+    """ISINs a prior pull confirmed have no daily history — matured/dead bonds BBG won't serve. We
+    skip these so a daily run doesn't re-hit ~85 dead bonds (~175s) every time. Delete
+    cache_intl/daily_empty.txt to force a re-check."""
+    try:
+        with open(_EMPTY_FILE, encoding="utf-8") as f:
+            return {ln.strip() for ln in f if ln.strip()}
+    except FileNotFoundError:
+        return set()
+
+
+def _mark_empty(isins):
+    if not isins:
+        return
+    alle = _load_empty() | {str(i) for i in isins}
+    with open(_EMPTY_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(alle)) + "\n")
+
+
 def _save_daily(isin, rows):
     if not rows:
         return 0
@@ -233,16 +255,21 @@ def _save_daily(isin, rows):
 def _pull_daily(isins, pause=0.2):
     """Per-bond chunked daily pull (assumes a bbg session is open). One bond at a time, each in small
     date windows; a bond that fails is logged and SKIPPED. Returns the list of failed ISINs."""
-    failed = []
+    failed, empty = [], []
     for n, i in enumerate(isins, 1):
         sec = f"{i} {linkers.BBG_SUFFIX}"
         try:
             nr = _save_daily(i, _history_one(sec, DAILY_FIELDS, DAILY_START, TODAY))
             print(f"  [{n}/{len(isins)}] {i} -> {nr} rows", flush=True)
+            if nr == 0:                       # BBG answered but has no history (matured/dead bond)
+                empty.append(i)
         except Exception as e:
             failed.append(i)
             print(f"  [{n}/{len(isins)}] {i} FAILED ({e}) — skipped, retry next run", flush=True)
         time.sleep(pause)
+    _mark_empty(empty)                        # remember dead bonds so we don't re-hit them next run
+    if empty:
+        print(f"  ({len(empty)} bonds had no data -> recorded as dead, skipped next run)", flush=True)
     return failed
 
 
@@ -266,7 +293,9 @@ def pull_bonds(skip_existing=True, include_deferred=False, do_enrich=True, pause
     _ensure_dirs()
     u = linkers.load_universe(include_deferred=include_deferred)
     if skip_existing:
-        u = u[~u["isin"].apply(lambda i: os.path.exists(os.path.join(CACHE, "daily", f"{i}.parquet")))]
+        empt = _load_empty()
+        u = u[~u["isin"].apply(lambda i: i in empt or
+                               os.path.exists(os.path.join(CACHE, "daily", f"{i}.parquet")))]
     if u.empty:
         print("  all bonds already cached"); return
     if do_enrich:
@@ -287,7 +316,9 @@ def pull_isins(isins, skip_existing=True, pause=0.2):
     _ensure_dirs()
     isins = list(dict.fromkeys(str(i) for i in isins if i))   # dedup, keep order
     if skip_existing:
-        isins = [i for i in isins if not os.path.exists(os.path.join(CACHE, "daily", f"{i}.parquet"))]
+        empt = _load_empty()
+        isins = [i for i in isins if i not in empt
+                 and not os.path.exists(os.path.join(CACHE, "daily", f"{i}.parquet"))]
     if not isins:
         print("  all requested ISINs already cached"); return []
     bbg.open_session()
