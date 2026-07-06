@@ -186,10 +186,15 @@ def pull_raw():
 def url(key=None, days=7):
     """Print a temporary browser link to a dashboard that RENDERS in-browser (no download). Valid up
     to 7 days (the IAM-user max). This is the zero-infra way to share the private dashboard today;
-    for a permanent stable internal URL, front the bucket with CloudFront (cloud-team / Terraform)."""
+    for a permanent stable internal URL, front the bucket with CloudFront (cloud-team / Terraform).
+      python storage.py url          # intl linkers dashboard
+      python storage.py url us       # US TIPS dashboard
+      python storage.py url <s3key>  # anything else in the bucket"""
     if not enabled():
         print("  [storage] S3 not configured — skipped"); return None
-    k = _key(key or "dashboards/dashboard_intl.html")
+    shortcuts = {None: "dashboards/dashboard_intl.html", "intl": "dashboards/dashboard_intl.html",
+                 "us": "dashboards/dashboard.html", "tips": "dashboards/dashboard.html"}
+    k = _key(shortcuts.get(key, key))
     u = _client().generate_presigned_url(
         "get_object",
         Params={"Bucket": BUCKET, "Key": k,

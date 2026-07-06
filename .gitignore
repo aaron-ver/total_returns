@@ -31,3 +31,7 @@ Thumbs.db
 
 # Scheduled-run logs (run_daily.ps1)
 /logs
+
+# Experiment outputs + experiment-only pulls (code in experiments/ IS tracked)
+/experiments/out
+/experiments/cache

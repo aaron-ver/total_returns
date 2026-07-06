@@ -114,6 +114,44 @@ drop new DMO **D5D** PDFs into `gilt_issuance\` and run:
 
 ---
 
+## Making changes (dev workflow)
+
+The pipeline is staged so you **only re-run what your change touches** — you rarely need a full run.
+The one rule: **PULL is only needed when the raw Bloomberg data changes.** Code changes (math, UI)
+read the existing cache, so skip it with `--no-pull`.
+
+| You changed… | Run | Bloomberg? |
+|---|---|---|
+| **Dashboard UI / client-side JS** (`dashboard_intl.py`, `dashboard.py`) — layout, controls, colors, the β/energy/box/regression math done in-browser | `.\.venv\Scripts\python.exe pipeline.py --no-pull --stage render` | No |
+| **Python calculations** (`engine.py`, `engine_intl.py`, `cmt_intl.py`, `breakeven_intl.py`, `seasonal_intl.py`, `energy_intl.py`, `hedge.py`, `pricing.py`) | `.\.venv\Scripts\python.exe pipeline.py --no-pull --push` | No |
+| **New raw data** — a new Bloomberg field, ticker, or bond that must be fetched | `.\.venv\Scripts\python.exe pipeline.py --push` (full) | **Yes** |
+
+Why: `BUILD` recomputes series from the cache, `EXPORT` rebuilds marts/reports, `RENDER` regenerates
+the HTML. A math change needs BUILD→EXPORT→RENDER (that's what `--no-pull --push` runs); a pure UI
+change only needs RENDER.
+
+### Iterate first, push when happy
+While tweaking, **leave off `--push`** so nothing goes to S3 until you've eyeballed it:
+```powershell
+.\.venv\Scripts\python.exe pipeline.py --no-pull --stage render   # rebuild the HTML locally
+start .\dashboard_intl.html                                       # open it in your browser to check
+#  …tweak dashboard_intl.py, repeat…
+.\.venv\Scripts\python.exe pipeline.py --stage push               # publish only once it looks right
+```
+For a calculation change, the loop is the same with `--no-pull` (no `--push`) to rebuild + preview,
+then `--stage push` when satisfied.
+
+### Adding a genuinely new data field (the one gotcha)
+If you add a **new field to an existing pull** (e.g. a new column in `DAILY_FIELDS`), the bonds
+already cached won't have it — `skip_existing` would leave them stale. Force a re-pull of the
+affected cache:
+- delete the relevant files under `cache_intl\daily\` (or the whole folder for a full re-pull), then
+- `.\.venv\Scripts\python.exe pipeline.py --push`
+
+A new *bond* or *ticker* doesn't need this — only a new *field* on already-cached securities.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
