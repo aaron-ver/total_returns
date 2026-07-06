@@ -19,8 +19,11 @@ $proj   = "C:\Users\azhang\OneDrive - Verition Fund Management LLC\Desktop\total
 $script = Join-Path $proj "run_daily.ps1"
 if (-not (Test-Path $script)) { Write-Error "run_daily.ps1 not found at $script"; exit 1 }
 
+# -WindowStyle Hidden: no console window pops up, so a stray click can't freeze the run
+# (Windows QuickEdit pauses output when the console is clicked). The log file is the record.
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`"" -WorkingDirectory $proj
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`"" `
+    -WorkingDirectory $proj
 
 # Weekdays only — linker/nominal markets are closed on weekends (a weekend run just finds no new
 # data, so this is only to avoid noise). Switch to -Daily if you prefer.
