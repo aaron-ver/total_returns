@@ -7,6 +7,8 @@ match the engines exactly (DV01-normalized bp per 100k DV01, BE = linker − β�
 linear cumsum, energy-interval bucketing per hedge.py / energy_intl.py).
 
 Run everything from the project root with the venv python.
+**Exact regression specs, variable construction, and output-column glossaries:
+[METHODOLOGY.md](METHODOLOGY.md).**
 
 ## Exp 1 — extension-conditioned month-end returns  `exp_extension.py`
 Month-end index flows scale with that month's **index duration extension** (new issuance entering
