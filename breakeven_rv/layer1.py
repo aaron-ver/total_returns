@@ -106,7 +106,7 @@ def build():
             out[f"r2_{name}"] = fit["r2"]
             sd = fit["resid_bp"].rolling(config.Z_WINDOW, min_periods=config.Z_MIN_PERIODS).std()
             out[f"z_{name}"] = fit["resid_bp"] / sd    # same-window residual vol (plan §7)
-        for c in config.L1_FACTORS:
+        for c in ["const"] + config.L1_FACTORS:   # const kept: frozen-coefficient FV (track1_decomp)
             out[f"beta_{c}"] = ols[f"beta_{c}"]
         out.to_parquet(_out(key))
         v = out.dropna(subset=["z_ols"])
