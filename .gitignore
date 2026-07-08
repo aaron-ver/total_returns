@@ -41,3 +41,4 @@ Thumbs.db
 /breakeven_rv/reports/figures
 /breakeven_rv/reports/*.parquet
 /breakeven_rv/reports/*.csv
+/breakeven_rv/*.pdf
