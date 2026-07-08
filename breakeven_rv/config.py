@@ -140,6 +140,35 @@ V5_BURNIN = 60            # segment burn-in (model abstains); sensitivity {40, 6
 V5_BURNIN_GRID = [40, 60, 120]
 V5_SEG_Z_MIN = 126        # z min_periods for the segmented residual (segments can be short)
 
+# --- v6 spec: hybrid FV + quiet-break detection (NO backtesting) --------------
+# ALL parameters below were declared BEFORE any validation run (hindsight discipline).
+# Development case: 10y 2021-22. Validation: 5y/30y + UK/France linkers (cache_intl).
+V6_QUIET_CUSUM_K = 0.5        # honest-residual drift (PRIME candidate): Page CUSUM on the
+V6_QUIET_CUSUM_H = 40.0       #   current segment's residual / burn-in sd; k in sd units
+V6_FERR_MULT = 2.5            # forecast-error degradation: rolling 60bd resid sd vs the
+V6_FERR_RUN = 20              #   segment's first-60bd sd; fire when > mult for run bd
+V6_MACRO_D = 3.5              # macro-state shift: Mahalanobis distance of [cpi momentum,
+V6_MACRO_RUN = 20             #   front-end level, gasoline 1y chg] from within-segment
+V6_MACRO_MIN = 120            #   mean/cov (first V6_MACRO_MIN bd); fire when > D for run bd
+V6_EWLS_HL_GRID = [504, 1008] # hybrid 2: within-segment EWLS half-lives (2y, 4y)
+V6_RIDGE_ALPHA_GRID = [1.0, 5.0]   # hybrid 3: ridge-to-anchor strength (x tr(X'X)/k)
+V6_STALE_WIN = 60             # staleness: |median residual| over trailing 60bd
+V6_STALE_MULT = 2.0           # "structurally wrong" day: |60bd mean resid| > 2x model resid sd
+V6_LAG_CEILING = 120          # a break found later than this vs narrative = miss wearing a lag
+V6_FP_BUDGET = 8              # > this many breaks / 18y / market = rolling window rebuilt: FAIL
+V6_RESELECT_BASKET = ["slope_3m10y", "log_gas", "vix", "log_usd",
+                      "slope_2s10s", "move", "cpi_yoy_lagged", "dgs10"]
+# narrative grading lists (event -> anchor date); detection graded timely if within
+# V6_LAG_CEILING bd AFTER the anchor
+V6_NARRATIVE = {
+    "us":  {"GFC": "2008-09-15", "taper": "2013-05-22", "covid": "2020-02-24",
+            "inflation_surge": "2021-04-01", "peak_pivot": "2022-10-01", "apr25": "2025-04-02"},
+    "UK_3M": {"GFC": "2008-09-15", "brexit": "2016-06-23", "covid": "2020-02-24",
+              "inflation_surge": "2021-04-01", "LDI": "2022-09-23"},
+    "FR_OATEI": {"GFC": "2008-09-15", "euro_crisis": "2011-07-01", "covid": "2020-02-24",
+                 "inflation_surge": "2021-04-01"},
+}
+
 # CPI publication lag: the CPI print for month m is released ~day 10-13 of m+1.
 # Conservative rule used for vintage discipline: value for month m becomes known
 # on the 15th calendar day of m+1 (first business day on/after).

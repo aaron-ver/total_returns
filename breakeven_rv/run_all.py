@@ -9,6 +9,7 @@ Orchestration for the breakeven RV study. Mirrors the plan's sequencing (§12).
                                            #     + experiment + revalidate + metrics + figures
   python -m breakeven_rv.run_all v4        # v4: component separation (signal-side only)
   python -m breakeven_rv.run_all v5        # v5: multi-tenor confirmation + regime detection
+  python -m breakeven_rv.run_all v6        # v6: hybrid FV frontier + quiet-break detection
   python -m breakeven_rv.run_all all       # everything
 
 Everything except `pull` and the BBG parts of `v3` runs from cache — no terminal needed.
@@ -67,6 +68,14 @@ def v4():
                                  v4_figures.fig_flow()))
 
 
+def v6():
+    from breakeven_rv import v6_partB, v6_partA, v6_partC, v6_figures
+    _step("V6 Part B detectors + FP budget (defines the surviving trigger)", v6_partB.run)
+    _step("V6 Part A frontier", v6_partA.run)
+    _step("V6 Part C reselection", v6_partC.run)
+    _step("V6 frontier figure", v6_figures.fig_frontier)
+
+
 def v5():
     from breakeven_rv import b_bond, v5_core, v5_partA, v5_partB, v5_partC, v5_figures, config as cfg
     for t in ("5y", "30y"):
@@ -116,3 +125,5 @@ if __name__ == "__main__":
         v4()
     if cmd in ("v5", "all"):
         v5()
+    if cmd in ("v6", "all"):
+        v6()

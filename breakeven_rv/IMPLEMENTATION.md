@@ -309,6 +309,46 @@ Key decisions & deviations:
    the report as the natural Part-C extension once segmentation exists); auctions
    (closed in v3).
 
+## v6 (hybrid FV + quiet-break detection, signal-side only) — as-built notes
+
+Modules: `v6_core.py` (sequential segmentation engine — frozen/EWLS/ridge-to-anchor
+within-segment models, stress/drift/ferr/macro triggers, refractory — plus the
+uniform evaluation harness), `v6_partA.py` (frontier), `v6_partB.py` (detector
+grading + FP budget + intl validation), `v6_partC.py` (LASSO->OLS reselection),
+`v6_figures.py`. Results: REPORT_V6.md.
+
+Sequencing note: Part B was run BEFORE Part A's final frontier, because the spec's
+combined trigger only admits budget-passing detectors — none passed, so the
+frontier's hybrids run on the stress-only trigger (one budget-failed combined row
+kept as reference).
+
+Decisions, bugs, deviations (all documented):
+1. **Refractory**: the first engine pass had no post-break refractory, so triggers
+   re-fired on ongoing events (54+ breaks). The v5-declared 126bd refractory was
+   adopted as an engine correction (a declared parameter, not tuned to outcomes).
+2. **Macro-detector arming bug**: the within-segment covariance window originally
+   required the FIRST 120 rows after segment start to be NaN-free; a NaN prefix
+   (gasoline 1y change starts 252bd into the panel) left it permanently unarmed
+   (0 breaks). Fixed to arm on the first 120 valid rows.
+3. **Intl construction** (validation markets, zero per-market tuning): BE = nominal −
+   linker yield from the 10y CMT bucket; slope vs the 7y bucket (2y exists only from
+   2024); factors [slope, log Brent (root cache 'front'), VIX]; no FX factor (no
+   cached series; new pulls out of scope). CPI columns: UK_RPI / EUR_HICPXT
+   (OATei references euro HICPxt). Narrative anchors before sample start + 400d are
+   excluded from grading denominators.
+4. **Part B headline verdict** under declared params: every quiet detector fails the
+   ≤8/18y FP budget on every market (drift 28-32, macro 20-26; ferr passes on 3/5
+   markets but detects 0-2 of 6 events). The h × burn-in sensitivity grid
+   (v6_drift_sensitivity.csv, reported whole) shows no budget-passing cell on the
+   10y — the failure is structural (60-120bd frozen anchors are always biased
+   somewhere; macro states trend vs any within-segment baseline).
+5. **Part C**: selection at stress breaks only, on burn-in data only (60bd headline +
+   120bd variant; 60bd selection is unstable — near-full baskets in calm segments).
+   The frozen-4F same-sample comparison row was dropped (basket sample differs from
+   the 4F sample); the cross-reference is Part A's bench_v5_frozen_stress.
+6. Part A price shares under low-phantom models are ratio-of-small-sums and flagged
+   unstable in the report (n_converged as low as 4).
+
 ## Known caveats
 
 - `both_cheap` occupies only ~2% of days (~85 obs) — the highest-conviction quadrant has
