@@ -31,16 +31,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from breakeven_rv import config, data_bonds, data_fred, data_bbg, data_asw, residuals
 from breakeven_rv.validation import rolling_z
 
-OUT = os.path.join(config.CACHE, "b_bond.parquet")
+OUT = os.path.join(config.CACHE, "b_bond.parquet")          # 10y (v3 default path)
 OUT_SANITY = os.path.join(config.REPORTS, "b_bond_sanity.csv")
 
 SWAP_T = np.array(config.SWAP_TENORS, dtype=float)
 
 
-def _holding_schedule() -> pd.DataFrame:
-    """Per date: OTR 10y TIPS cusip (engine schedule) + 1st-off-the-run (the previous
+def _out_path(tenor: str) -> str:
+    return OUT if tenor == "10y" else os.path.join(config.CACHE, f"b_bond_{tenor}.parquet")
+
+
+def _holding_schedule(tenor: str = "10y") -> pd.DataFrame:
+    """Per date: OTR TIPS cusip (engine schedule) + 1st-off-the-run (the previous
     OTR). Also the engine's matched nominal (for the ASW cross-check)."""
-    ex = pd.read_csv(os.path.join(config.ROOT, "exports", "breakeven_10y.csv"),
+    ex = pd.read_csv(os.path.join(config.ROOT, "exports", f"breakeven_{tenor}.csv"),
                      usecols=["date", "TIPS_cusip", "UST_cusip"], parse_dates=["date"]
                      ).set_index("date")
     seq = ex["TIPS_cusip"][ex["TIPS_cusip"] != ex["TIPS_cusip"].shift(1)]
@@ -93,18 +97,18 @@ def _seasonal_adjust(B: pd.Series) -> tuple[pd.Series, pd.Series]:
     return B - seas, seas
 
 
-def build():
+def build(tenor: str = "10y"):
     config.ensure_dirs()
     quotes = data_bonds.load()
     quotes = quotes[quotes["leg"] == "tips"]
     fred = data_fred.load()
     swaps = data_bbg.load()
-    sched = _holding_schedule()
+    sched = _holding_schedule(tenor)
 
     parts = {}
     for name, col in (("otr", "otr_cusip"), ("off1", "off1_cusip")):
         parts[name] = _bond_basis(quotes, fred, swaps, sched[col])
-        print(f"  {name}: {len(parts[name])} days  "
+        print(f"  {tenor} {name}: {len(parts[name])} days  "
               f"{parts[name].index.min().date()} -> {parts[name].index.max().date()}")
 
     out = pd.DataFrame(index=parts["otr"].index.union(parts["off1"].index))
@@ -114,12 +118,17 @@ def build():
     out["B_comb"] = out[["B_otr", "B_off1"]].mean(axis=1)
     out["B_comb_sa"], out["seasonal"] = _seasonal_adjust(out["B_comb"].dropna())
     out["z_B_bond"] = rolling_z(out["B_comb_sa"], config.Z_WINDOW, config.Z_MIN_PERIODS)
-    out["z_B_bond_otr"], _ = None, None
     out["z_B_bond_otr"] = rolling_z(_seasonal_adjust(out["B_otr"].dropna())[0],
                                     config.Z_WINDOW, config.Z_MIN_PERIODS)
     out["otr_cusip"] = sched["otr_cusip"].reindex(out.index)
     out["off1_cusip"] = sched["off1_cusip"].reindex(out.index)
-    out.to_parquet(OUT)
+    # v5: flag seasonal amplitude (5y seasonality expected LARGER — construction check)
+    seas_amp = out["seasonal"].max() - out["seasonal"].min()
+    print(f"  {tenor} seasonal amplitude (max-min of month effects): {seas_amp:.1f}bp")
+    out.to_parquet(_out_path(tenor))
+    if tenor != "10y":
+        print(f"  wrote {_out_path(tenor)}")
+        return out
 
     # ---- sanity table (spec P1) ----
     res = residuals.load()
@@ -168,13 +177,14 @@ def build():
     return out
 
 
-def load():
-    if not os.path.exists(OUT):
-        raise FileNotFoundError(f"{OUT} missing — run: python -m breakeven_rv.b_bond build")
-    return pd.read_parquet(OUT)
+def load(tenor: str = "10y"):
+    path = _out_path(tenor)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"{path} missing — run: python -m breakeven_rv.b_bond build {tenor}")
+    return pd.read_parquet(path)
 
 
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
-    build()
+    build(sys.argv[2] if len(sys.argv) > 2 else "10y")

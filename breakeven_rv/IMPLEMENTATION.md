@@ -263,6 +263,52 @@ Key implementation decisions & deviations:
 8. Bootstrap for the asymmetry test resamples EPISODES (non-overlapping by
    construction) — block structure is at the episode level.
 
+## v5 (regime detection & multi-tenor confirmation, signal-side only) — as-built notes
+
+Modules: `v5_core.py` (tenor-generalized layer1/state/episodes + the formalized
+4-flag monitor), `v5_partA.py` (H1-H6 scorecard), `v5_partB.py` (transitions,
+lead/lag, sensitivity), `v5_partC.py` (break detectors + segmented FV),
+`v5_figures.py`. b_bond.py was parameterized by tenor (10y default path unchanged, so
+v3/v4 remain reproducible). Results: REPORT_V5.md.
+
+Key decisions & deviations:
+1. **5y/30y B_bond** built with identical machinery; seasonal amplitude check per spec
+   (5y 17.4bp > 30y 10.5bp — no construction issues). 30y episode half-life clip
+   (5, 90bd) per spec; 5y/10y stay (5, 60).
+2. **Monitor (fixed v5 rule)**: 4 flags — |5d dz_B|, MOVE, VIX, 20d BE-equity corr —
+   each at its EXPANDING ≥ .90 percentile; CRISIS = ≥2 flags. v4 used 3 flags with 1y
+   rolling percentiles for MOVE/VIX; the v5 rule is the formal object.
+3. **BUG FIX (material, documented)**: the expanding-percentile helper originally
+   ranked against the full index INCLUDING the NaN prefix of late-starting series
+   (z_B_bond starts ~2013 on a 2004 index), so its percentile was diluted and the
+   dz_B flag could effectively never reach 0.9; the coef-distance detector's trigger
+   had the same defect (zero breaks fired). Fixed to rank against non-NaN history
+   only; all v5 episode caches rebuilt. v4's published numbers used its own (1y
+   rolling) percentiles for MOVE/VIX and are unaffected except the dz_B flag, which
+   under-fired there too — v4's in-episode split direction is unchanged (v5 Part B
+   sensitivity reproduces it at ≥3 flags).
+4. **Part A grading is mechanical** (rules coded in v5_partA before results):
+   monotonicity + sign conditions for H1; 0.5x-share comparability for H2; strict
+   monotone for H3; share+tail+worst-cell joint condition for H4; median ≥ 2/3 for
+   H5; CI-includes-0 for H6. Pooled inference = quarter-cluster bootstrap on
+   per-quarter (pnl, gap) sums (exact for ratio-of-sums shares).
+5. **Detectors** (params pre-declared in config): Page-CUSUM (k=.5sd, h=15, 252bd
+   warm-up/segment) on expanding within-segment one-step-ahead residuals;
+   coefficient-vector distance (two adjacent 504bd windows, impact-weighted RMS in
+   bp, expanding ≥.95 pctl, 126bd refractory); monitor CRISIS ≥10 consecutive bd.
+   Segmented model fits ONCE on the first {40,60,120}bd of each segment and freezes;
+   abstains during burn-in (abstention days reported).
+6. **Honest Part-C failure modes reported**: CUSUM fires annually (drift
+   accumulator — rebuilt the rolling window); coef-distance unstable/calm-fires; the
+   winning monitor detector misses NON-STRESS regime changes (2013 taper, the 2021
+   inflation turn), leaving the post-COVID segment >100bp stale until Oct-2022
+   (figure v5_segmented_fv.png). Segmentation's phantom cure (53%→13%) is partly
+   mechanical (frozen coefficients cannot drift) — that is the design intent, but the
+   segmented FV is not usable between stress breaks as-is.
+7. Out of scope per spec: backtesting/PnL; per-regime variable reselection (noted in
+   the report as the natural Part-C extension once segmentation exists); auctions
+   (closed in v3).
+
 ## Known caveats
 
 - `both_cheap` occupies only ~2% of days (~85 obs) — the highest-conviction quadrant has

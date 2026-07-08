@@ -8,6 +8,7 @@ Orchestration for the breakeven RV study. Mirrors the plan's sequencing (§12).
   python -m breakeven_rv.run_all v3        # v3: pulls (bonds/dealer/fixings/asw) + b_bond
                                            #     + experiment + revalidate + metrics + figures
   python -m breakeven_rv.run_all v4        # v4: component separation (signal-side only)
+  python -m breakeven_rv.run_all v5        # v5: multi-tenor confirmation + regime detection
   python -m breakeven_rv.run_all all       # everything
 
 Everything except `pull` and the BBG parts of `v3` runs from cache — no terminal needed.
@@ -66,6 +67,22 @@ def v4():
                                  v4_figures.fig_flow()))
 
 
+def v5():
+    from breakeven_rv import b_bond, v5_core, v5_partA, v5_partB, v5_partC, v5_figures, config as cfg
+    for t in ("5y", "30y"):
+        _step(f"V5 b_bond {t}", lambda t=t: b_bond.build(t))
+    def _eps():
+        for t in cfg.V5_TENORS:
+            v5_core.build_layer1(t)
+            for ez in cfg.V3_ENTRY_GRID:
+                v5_core.episodes(t, ez, use_cache=False)
+    _step("V5 core episodes (all tenors)", _eps)
+    _step("V5 Part A scorecard", v5_partA.run)
+    _step("V5 Part B monitor", v5_partB.run)
+    _step("V5 Part C segmented FV", v5_partC.run)
+    _step("V5 figures", lambda: (v5_figures.fig_flag_timeline(), v5_figures.fig_segmented_fv()))
+
+
 def v3():
     from breakeven_rv import (data_bonds, data_dealer, data_fixings, data_asw,
                               b_bond, v3_experiment, v3_revalidate, v3_metrics, v3_figures)
@@ -97,3 +114,5 @@ if __name__ == "__main__":
         v3()
     if cmd in ("v4", "all"):
         v4()
+    if cmd in ("v5", "all"):
+        v5()

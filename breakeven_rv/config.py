@@ -119,6 +119,27 @@ V4_SENS_FLAGS = [1, 2, 3]
 V4_MIN_CELL = 10               # anecdote rule: cells under this are not establishable
 COVID_CATALYST = "2020-03-23"  # the datable external catalyst (Fed announcement)
 
+# --- v5 spec: regime detection & multi-tenor confirmation (NO backtesting) ---
+V5_TENORS = ["5y", "10y", "30y"]
+V5_HL_CLIP = {"5y": (5, 60), "10y": (5, 60), "30y": (5, 90)}   # 30y: longer half-lives allowed
+# Part B monitor (FIXED headline rule; thresholds from v4's declared grid):
+#   flags = {|5d dz_B| expanding-pctl >= .90, MOVE expanding-pctl >= .90,
+#            VIX expanding-pctl >= .90, 20d BE-equity corr expanding-pctl >= .90}
+#   CRISIS when >= 2 flags; B-FLIP = quadrant -> contradict while CRISIS.
+V5_MONITOR_PCTL = 0.90
+V5_MONITOR_MIN_FLAGS = 2
+# Part C — break detectors (parameters pre-declared here):
+V5_CUSUM_K = 0.5          # Page-CUSUM drift (in sd of recursive one-step residuals)
+V5_CUSUM_H = 15.0         # Page-CUSUM threshold
+V5_CUSUM_WARMUP = 252     # bd from segment start before the CUSUM accumulates
+V5_COEF_HALF = 504        # coefficient-distance: two adjacent non-overlapping 504bd windows
+V5_COEF_PCTL = 0.95       # fire when distance > expanding 95th pctl of own history
+V5_REFRACTORY = 126       # no new break within this many bd of the last (both detectors)
+V5_MONITOR_RUN = 10       # detector 3: CRISIS for >= this many consecutive bd = break
+V5_BURNIN = 60            # segment burn-in (model abstains); sensitivity {40, 60, 120}
+V5_BURNIN_GRID = [40, 60, 120]
+V5_SEG_Z_MIN = 126        # z min_periods for the segmented residual (segments can be short)
+
 # CPI publication lag: the CPI print for month m is released ~day 10-13 of m+1.
 # Conservative rule used for vintage discipline: value for month m becomes known
 # on the 15th calendar day of m+1 (first business day on/after).
