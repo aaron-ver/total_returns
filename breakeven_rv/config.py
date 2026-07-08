@@ -31,6 +31,7 @@ BBG_SERIES = {
     "real30": ("USGGT30Y Index", "PX_LAST"),
     "move":   ("MOVE Index", "PX_LAST"),       # rates implied vol (stress conditioning)
     "bbdxy":  ("BBDXY Index", "PX_LAST"),      # Bloomberg USD spot index (traded, unrevised; from Dec-2004)
+    "spx":    ("SPX Index", "PX_LAST"),        # v4: cross-asset stress (BE-equity correlation)
 }
 
 # --- FRED series (no key needed; fredgraph csv endpoint) --------------------
@@ -47,6 +48,7 @@ FRED_SERIES = {
     "be10_fred":  "T10YIE",    # cross-checks of the BBG CM breakevens
     "be5_fred":   "T5YIE",
     "real10_fred": "DFII10",
+    "cpff":       "CPFF",      # v4: 3m CP − fed funds (funding stress; FRA-OIS has no public series — documented)
 }
 
 # --- TreasuryDirect auction pull --------------------------------------------
@@ -105,6 +107,17 @@ V3_ENTRY_GRID = [0.75, 1.0, 1.5]     # episode robustness grid (report all, tune
 V3_EXIT_GRID = [0.25, 0.5]
 V3_DECAY_LAGS = [1, 3, 5, 10]        # signal decay profile: z measured at t-lag
 CONFIRM_MIN_N = 12             # below this n, the confirm-cell result is "not establishable"
+
+# --- v4 spec: component separation (signal-side only; NO backtesting) --------
+V4_EXIT_Z = 0.25               # episode exit for all v4 tables (entry grid = V3_ENTRY_GRID)
+V4_FROZEN_EXTRA_BD = 60        # keep tracking frozen z this long after live exit (lag measure)
+V4_CRISIS_PCTL = 0.90          # pre-declared crisis rule (declared BEFORE outcome splits):
+V4_CRISIS_MIN_FLAGS = 2        #   crisis = >= 2 of {|5d dz_B| expanding-pctl >= .90,
+                               #                     MOVE 1y-pctl >= .90, VIX 1y-pctl >= .90}
+V4_SENS_PCTLS = [0.85, 0.90, 0.95]     # appendix sensitivity grid (report, don't tune)
+V4_SENS_FLAGS = [1, 2, 3]
+V4_MIN_CELL = 10               # anecdote rule: cells under this are not establishable
+COVID_CATALYST = "2020-03-23"  # the datable external catalyst (Fed announcement)
 
 # CPI publication lag: the CPI print for month m is released ~day 10-13 of m+1.
 # Conservative rule used for vintage discipline: value for month m becomes known

@@ -227,6 +227,42 @@ exit_z, quad_override)` (+ side/MAE/MFE/identity columns),
 - P4 conditionality: transfer outcome was (c), so the spec'd B-strategy v3 backtest was
   NOT run. The confirm-gated A grid (v3_metrics) stands in as the surviving-book test.
 
+## v4 (component separation, signal-side only) — as-built notes
+
+Scope: NO backtesting/PnL/execution in this run (spec constraint). Modules:
+`v4_core.py` (daily state-variable frame + enriched episode builder: frozen-z
+tracking, pre-declared crisis rule, dealer state — cached per entry threshold),
+`v4_exp1..5.py` (one per experiment), `v4_figures.py`. Results: REPORT_V4.md.
+
+Key implementation decisions & deviations:
+1. **Frozen z**: z_frozen(t) = (y(t) − X(t)·b_entry)/vol_entry with vol_entry =
+   resid_entry/z_entry, so z_frozen(entry) == z_live(entry) identically. Tracked to
+   60bd past the live exit for the resolution-lag measure.
+2. **Crisis rule pre-declared in config** (V4_CRISIS_*) before any outcome split:
+   ≥2 of {|5d dz_B| expanding-pctl ≥ .90, MOVE 1y-pctl ≥ .90, VIX 1y-pctl ≥ .90};
+   sensitivity grid {0.85,0.90,0.95}×{1,2,3} reported whole in
+   v4_state_sensitivity.csv. The percentile inputs are expanding/rolling (real-time).
+3. **In-episode state tables are EX-POST** (max flags reached during the episode) and
+   labeled as monitoring-rule evidence only — motivated by the entry-blindness
+   finding (all worst-MAE episodes normal at entry).
+4. **B_clean is causal**: trailing-504bd rolling OLS of B_comb_sa on
+   [gcf_spread, MOVE], residual z-scored on the standard trailing window. The
+   full-sample/by-year variance table is descriptive and says so. No OTR-specialness
+   series exists in the repo — documented stub (a repo-specials feed would slot into
+   the same regression).
+5. **FRA-OIS**: no public series exists; CPFF (FRED, 3m CP − fed funds) is the
+   documented stand-in. SPX added to the standard BBG pull for the BE-equity
+   20d correlation ("everything sold at once").
+6. **Dealer flow variable**: 1y rolling z of total net TIPS positions within each
+   FR2004 series break, publication-lagged (as-known daily view). Terciles collapsed
+   to halves for interaction cells when any cell < 10 (happened: min cell = 1).
+7. **Stabilization** (wait-cost): first day after entry when the sign-adjusted 5d
+   change of z_A stops worsening; catalyst date for the 2020 episode = 2020-03-23
+   (config.COVID_CATALYST). Spiral set for wait-cost = flags ≥2 reached in-episode
+   AND MAE < −10bp (11 episodes).
+8. Bootstrap for the asymmetry test resamples EPISODES (non-overlapping by
+   construction) — block structure is at the episode level.
+
 ## Known caveats
 
 - `both_cheap` occupies only ~2% of days (~85 obs) — the highest-conviction quadrant has

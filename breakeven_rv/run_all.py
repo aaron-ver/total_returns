@@ -7,6 +7,7 @@ Orchestration for the breakeven RV study. Mirrors the plan's sequencing (§12).
   python -m breakeven_rv.run_all layer2    # v2: track1 (+decomp), track2, track3 backtest
   python -m breakeven_rv.run_all v3        # v3: pulls (bonds/dealer/fixings/asw) + b_bond
                                            #     + experiment + revalidate + metrics + figures
+  python -m breakeven_rv.run_all v4        # v4: component separation (signal-side only)
   python -m breakeven_rv.run_all all       # everything
 
 Everything except `pull` and the BBG parts of `v3` runs from cache — no terminal needed.
@@ -52,6 +53,19 @@ def layer2():
     _step("TRACK3 backtest", track3_backtest.run)
 
 
+def v4():
+    from breakeven_rv import v4_core, v4_exp1, v4_exp2, v4_exp3, v4_exp4, v4_exp5, v4_figures
+    for ez in [0.75, 1.0, 1.5]:
+        _step(f"V4 episodes entry_z={ez}", lambda ez=ez: v4_core.episodes(ez, use_cache=False))
+    _step("V4 exp1 frozen-z", v4_exp1.run)
+    _step("V4 exp2 B_clean", v4_exp2.run)
+    _step("V4 exp3 flow", v4_exp3.run)
+    _step("V4 exp4 asymmetry", v4_exp4.run)
+    _step("V4 exp5 state/wait-cost", v4_exp5.run)
+    _step("V4 figures", lambda: (v4_figures.fig_phantom(), v4_figures.fig_wait_cost(),
+                                 v4_figures.fig_flow()))
+
+
 def v3():
     from breakeven_rv import (data_bonds, data_dealer, data_fixings, data_asw,
                               b_bond, v3_experiment, v3_revalidate, v3_metrics, v3_figures)
@@ -81,3 +95,5 @@ if __name__ == "__main__":
         layer2()
     if cmd in ("v3", "all"):
         v3()
+    if cmd in ("v4", "all"):
+        v4()
