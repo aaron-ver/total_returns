@@ -80,20 +80,23 @@ the structure-return layer (switches/flies as financed packages), and the three 
    — ES pooled into EUR robustness only, DE dropped**; German issuance is terminated anyway).
    Subsample splits change accordingly: FR/IT get a pre/post-2015 split and a 2010–12 crisis
    dummy; UK gets LDI (Sep–Oct 22) and RPI-reform (Nov 20) exclusion runs as in the draft.
-2. **Intl reopening anchors are settlement-dated, not auction-dated.** BBG-sourced reopenings in
-   `cache_intl/auctions.parquet` are dated by the AMT_OUTSTANDING step (≈ settle, T+2..T+5 after
-   auction). GB events from DMO PDFs have true auction dates; FR/IT/ES mostly don't. Handle by
-   (a) preferring DMO/manual-CSV rows where present, (b) back-shifting bbg_amt anchors by the
-   market's standard settle lag and flagging them `anchor_quality='approx'`, (c) robustness run
-   excluding approx anchors. Do **not** silently mix anchor types.
+2. **Intl anchor quality — RESOLVED BETTER THAN ASSUMED (build finding, 2026-07-09).** The
+   original concern was that BBG-sourced reopenings are settlement-dated (AMT_OUTSTANDING
+   step). In the *actual* cache, all FR/IT/ES/GB reopenings came from the manual auction-results
+   files (AFT/Tesoro/BdE/DMO, `source='dmo'`) and carry **true auction dates** →
+   `anchor_quality='exact'` for 834/899 intl events. Only the 12 bbg-static new-issue rows are
+   settlement-dated (back-shifted by settle lag, `'approx'`); 53 syndications are
+   `'pricing_only'` (Q5). The back-shift + never-mix-silently machinery stays in place for any
+   future bbg_amt-sourced rows; approx-anchor shares reported in `reports/data_quality.csv`.
 3. **US CTM buckets don't exist and won't be built.** The draft leans on CTM everywhere; for TIPS
    the artifact finding says bond-level is safer anyway. US curve/fly measures come from the
    fitted-curve layer (below) + `b_bond` + engine tenor returns. Intl keeps CMT buckets (2016+)
    *plus* bond-level residuals (2002+) — the pre-2016 intl sample is bond-residual-only.
-4. **The US quote universe must be extended for the fly study.** `tips_bond_quotes` covers only
-   engine-held CUSIPs. Study B needs the neighbors/wings of every new issue — i.e. the full TIPS
-   strip (~50 live + matured since 2010). One terminal pull session via existing `data_layer.py`
-   machinery; `auctions.py` already provides the CUSIP list.
+4. **The US quote universe extension is nearly free (build finding, 2026-07-09).** The engine
+   cache already covers 93/99 of the full TIPS strip alive since 2004;
+   `cache/bond_quotes_full.parquet` (169k rows, 2004→now) is built. The one terminal session
+   shrinks to 6 matured 1998-2002 10y/30y CUSIPs (only needed for pre-2010 fly wings) plus any
+   refresh — see `python -m breakeven_structures.data_universe dry-run`.
 5. **Announcement dates: free for the US, manual for intl.** TreasuryDirect serves
    `announcementDate` (verified against the live API 2026-07-08) — one-line addition to the
    `data_auctions.py` KEEP list, full history backfillable. AFT/Tesoro announcement dates would be
@@ -237,21 +240,43 @@ with `pull()/build()/load()`. Findings and deviations logged in `IMPLEMENTATION.
 
 ---
 
-## 9. Open questions / data needed (answers change scope, not design)
+## 9. Resolved questions & standing directives (user, 2026-07-09)
 
-- **Q1 — Sequencing:** plan assumes TIPS-first v1, FR/IT/UK v2. Confirm or reorder.
-- **Q2 — Nominal auctions:** BE structures also react to *nominal* supply. Extending
-  `data_auctions.py` to pull nominal 5/10/30 internals is trivial (same API). Include nominal
-  auction events as a separate event type in v1? (Plan says yes unless told otherwise.)
-- **Q3 — Terminal session:** Phase 0 needs one DAPI session (full TIPS strip ~50 CUSIPs × 16y
-  daily history, batched). Any preferred time window on the terminal box?
-- **Q4 — UK pre-2014:** the 8m-lag gilt universe isn't cached. Pulling it would extend UK to
-  ~2005 (pre-GFC + pre-LDI sample) at the cost of a manual ISIN list + pull. Worth it, or is
-  2014+ UK acceptable for v2?
-- **Q5 — Intl announcement dates:** AFT/Tesoro/DMO announcement calendars are manual assembly.
-  v1 proceeds auction-anchored for intl; flag if the desk has these on file.
-- **Q6 — Index-entry dates:** deterministic approximation (first month-end post-issue) vs real
-  index-extension dates (desk/BBG export). Approximation used until real dates supplied.
-- **Q7 — WI snaps:** if the desk saves 1pm WI levels going forward (`breakeven_rv/inbox/
-  wi_snaps.csv` format: cusip, auctionDate, wi_yield_1pm), the true-tail leg of the US study
-  switches on automatically. No historical source exists.
+All of the below are DECLARED parameters — encoded in `config.py` and logged in
+`IMPLEMENTATION.md` before any event panel was built.
+
+- **Q1 (resolved):** TIPS-first v1; FR/IT/UK as **frozen-spec v2** — nothing in v2 gets tuned.
+- **Q2 (resolved):** nominal 5/10/30 auctions included in **two roles**: (a) separate event type
+  (BE structures around nominal supply), (b) contamination flag in TIPS event windows —
+  overlapping same-tenor nominal supply inside t−10..t+10 flagged like CPI prints. Internals
+  pulled for nominals too (public API, done in Phase 0).
+- **Q3 (resolved):** prep first, pull once. Full pull script + CUSIP list + batching dry-run
+  built from cache; the user runs the single terminal session when flagged ready. Session
+  covers everything Phase 0 needs: full TIPS strip, `announcementDate` backfill, nominal
+  internals (the latter two are public-API and were pulled without the terminal).
+- **Q4 (resolved):** **No pre-2014 UK.** 8m-lag gilts are structurally a different instrument
+  (lag mechanics, carry, seasonal treatment) — pooling would mix non-comparables. Parked as a
+  possible v3 only if UK v2 comes back marginal *and* sample-starved. UK = 2014+.
+- **Q5 (resolved):** auction-anchored intl is fine for regular auctions; **syndications split
+  out**. Pricing-day anchoring is near-meaningless for syndications (concession builds from
+  mandate announcement). Targeted sourcing of mandate dates for syndication events only (BBG
+  headlines/press releases, small n); until then syndications are excluded from pre-event path
+  analysis or run post-pricing-only with `anchor_quality='pricing_only'`. Never diluted into
+  auction buckets.
+- **Q6 (resolved):** index-entry approximation accepted with an **EUR fix**: EUR new issues often
+  launch below index-minimum size and enter only once reopenings build the outstanding —
+  approximate EUR entry as first month-end after AMT_OUTSTANDING crosses the index minimum-size
+  threshold. US/UK keep the simple first-month-end-post-issue rule.
+- **Q7 (resolved):** desk starts saving 1pm WI snaps going forward (desk-side setup). Treated
+  as a slow-accruing future leg, not a v1 dependency.
+
+**Standing directives:**
+1. **CPI-in-window: dummy, don't drop.** The mid-month CPI print lands inside ±10bd of most TIPS
+   auctions; exclusion would gut the sample. Dummy out the print-day move (or report paths with
+   print-day return excluded); full exclusion is a robustness run only.
+2. **Holdout regime caveat, declared now:** chronological 60% split on TIPS ⇒ training ≈ pre-2020,
+   holdout ≈ 2021-22 inflation regime + after. Honest but regime-shifted — **holdout-era placebo
+   distributions reported separately** so rules can't quietly pass/fail for macro reasons.
+3. **anchor_quality robustness confirmed:** back-shift bbg_amt anchors by standard settle lag,
+   never mix anchor types silently, and report the approx-anchor share per bucket in the
+   data-quality deliverable.

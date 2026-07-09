@@ -11,7 +11,10 @@ code. Config via environment:
   (+ your AWS creds — set them via the access-portal copy-paste or an SSO profile)
 
 Setup once:  pip install boto3   (into .venv)
-Usage:       python storage.py            # push consumable ARTIFACTS to S3 (marts/exports/plots/dashboards)
+Usage:       python storage.py            # push consumable ARTIFACTS to S3 (marts/exports/plots/dashboards/PDFs)
+             python storage.py portal     # ONE shareable link: index page covering both dashboards + research PDFs
+             python storage.py url [us]   # single-item link (intl default; us/tips for the US dashboard)
+             python storage.py identity   # AWS auth diagnostic (no secrets printed)
              python storage.py push-raw   # TERMINAL box: upload raw caches (cache/, cache_intl/) after the pull
              python storage.py pull-raw   # CLOUD/any box: download raw caches so BUILD can run without a terminal
 """
@@ -31,6 +34,15 @@ FILES = {"dashboard_intl.html": "dashboards/dashboard_intl.html",
 # headless/cloud box (or any teammate) before BUILD — so the compile can run anywhere, not just
 # where Bloomberg is. This is what makes the data live in S3 instead of one machine.
 RAW_DIRS = {"cache": "raw/cache", "cache_intl": "raw/cache_intl"}
+
+
+def _research_pdfs():
+    """Local research PDFs (experiments/out/*.pdf) -> S3 keys under research/."""
+    d = os.path.join(HERE, "experiments", "out")
+    if not os.path.isdir(d):
+        return {}
+    return {os.path.join(d, f): f"research/{f}" for f in sorted(os.listdir(d))
+            if f.endswith(".pdf")}
 
 
 def enabled():
@@ -86,16 +98,19 @@ def push():
                 if _put_if_changed(cli, path, _key(sub, rel)): u += 1
                 else: s += 1
         up += u; skip += s; print(f"    {d:10s} -> {sub}/  ({u} changed, {s} unchanged)")
-    for f, key in FILES.items():
-        p = os.path.join(HERE, f)
+    singles = {os.path.join(HERE, f): key for f, key in FILES.items()}
+    singles.update(_research_pdfs())                       # experiment PDFs -> research/
+    for p, key in singles.items():
         if os.path.isfile(p):
             # no-cache => the browser revalidates every visit, so a shared link always shows the
             # latest daily build instead of a stale cached copy.
-            extra = {"ContentType": "text/html", "CacheControl": "no-cache"} if f.endswith(".html") else {}
+            extra = ({"ContentType": "text/html", "CacheControl": "no-cache"} if p.endswith(".html")
+                     else {"ContentType": "application/pdf", "CacheControl": "no-cache"}
+                     if p.endswith(".pdf") else {})
             if _put_if_changed(cli, p, _key(key), extra):
-                up += 1; print(f"    {f} -> {key}  (changed)")
+                up += 1; print(f"    {os.path.basename(p)} -> {key}  (changed)")
             else:
-                skip += 1; print(f"    {f} -> {key}  (unchanged)")
+                skip += 1; print(f"    {os.path.basename(p)} -> {key}  (unchanged)")
     print(f"  [storage] uploaded {up} changed, skipped {skip} unchanged")
     return up
 
@@ -205,11 +220,110 @@ def url(key=None, days=7):
     return u
 
 
+PORTAL_ITEMS = [
+    ("dashboards/dashboard_intl.html", "European & UK linkers dashboard",
+     "CMT buckets and per-bond financed breakevens - cumulative, auction-cycle and calendar "
+     "seasonality, Brent energy hedge, performance stats."),
+    ("dashboards/dashboard.html", "US TIPS dashboard",
+     "US fixed-maturity breakevens - cumulative returns, seasonality, gasoline hedge."),
+]
+
+
+def portal(days=7):
+    """ONE link for everything: builds a small index page linking every dashboard + research PDF
+    (each via its own presigned URL), uploads it, and prints a single presigned link to the page.
+    Inner content stays fresh automatically (the daily push overwrites the same S3 keys); the whole
+    set of links expires together after `days` (max 7) — regenerate weekly and resend one URL."""
+    if not enabled():
+        print("  [storage] S3 not configured — skipped"); return None
+    cli = _client()
+    exp = int(min(days, 7) * 86400)
+
+    def _sign(key, ctype):
+        return cli.generate_presigned_url("get_object", ExpiresIn=exp, Params={
+            "Bucket": BUCKET, "Key": _key(key),
+            "ResponseContentType": ctype, "ResponseContentDisposition": "inline"})
+
+    def _list(prefix):
+        for page in cli.get_paginator("list_objects_v2").paginate(Bucket=BUCKET,
+                                                                  Prefix=_key(prefix)):
+            for o in page.get("Contents", []):
+                yield o["Key"][len(PREFIX):].lstrip("/") if PREFIX else o["Key"]
+
+    items = []
+    for key, title, desc in PORTAL_ITEMS:
+        try:
+            cli.head_object(Bucket=BUCKET, Key=_key(key))
+            items.append((title, desc, _sign(key, "text/html"), "DASHBOARD"))
+        except Exception:
+            print(f"  (skipping {key} — not in bucket; run a push first)")
+    # Live monitors — whatever Hobbes publish.py pushed under monitors/ (html views + xlsx reports)
+    for key in _list("monitors/"):
+        name = os.path.basename(key)
+        title = os.path.splitext(name)[0].replace("_", " ").replace("-", " ")
+        if key.endswith(".html"):
+            items.append((title, "Live monitor — opens in the browser.",
+                          _sign(key, "text/html"), "MONITOR"))
+        elif key.endswith(".xlsx"):
+            u = cli.generate_presigned_url("get_object", ExpiresIn=exp, Params={
+                "Bucket": BUCKET, "Key": _key(key),
+                "ResponseContentDisposition": f'attachment; filename="{name}"'})
+            items.append((title, "Latest report — downloads as Excel.", u, "MONITOR"))
+    for key in _list("research/"):
+        if key.endswith(".pdf"):
+            name = os.path.basename(key).replace("report_", "").replace(".pdf", "")
+            items.append((name.replace("_", " "), "Research note (PDF).",
+                          _sign(key, "application/pdf"), "RESEARCH"))
+    if not items:
+        print("  [storage] nothing to link — push dashboards/PDFs first"); return None
+
+    from datetime import date, timedelta
+    until = (date.today() + timedelta(days=min(days, 7))).strftime("%b %d")
+    cards = "\n".join(
+        f'<a class="card" href="{u}" target="_blank"><div class="tag">{tag}</div>'
+        f'<h2>{t}</h2><p>{d}</p></a>' for t, d, u, tag in items)
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Linkers &amp; TIPS</title>
+<style>
+ body{{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f9f9f7;color:#0b0b0b;
+      margin:0;padding:48px 24px}}
+ .wrap{{max-width:760px;margin:0 auto}} h1{{font-size:26px;margin:0 0 4px}}
+ .sub{{color:#52514e;font-size:14px;margin:0 0 28px}}
+ .card{{display:block;background:#fcfcfb;border:1px solid #e1e0d9;border-radius:10px;
+       padding:18px 20px;margin:0 0 14px;text-decoration:none;color:inherit}}
+ .card:hover{{border-color:#2a78d6}}
+ .card h2{{font-size:16px;margin:2px 0 6px}} .card p{{font-size:13px;color:#52514e;margin:0}}
+ .tag{{font-size:10px;letter-spacing:.08em;color:#898781;font-weight:600}}
+ .foot{{color:#898781;font-size:12px;margin-top:24px}}
+</style></head><body><div class="wrap">
+<h1>Linkers &amp; TIPS</h1>
+<p class="sub">Dashboards update automatically with each daily refresh. Links on this page are
+valid until {until}.</p>
+{cards}
+<div class="foot">Generated {date.today():%b %d, %Y} · private — do not forward outside the desk.</div>
+</div></body></html>"""
+
+    tmp = os.path.join(HERE, "_portal_tmp.html")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(html)
+    try:
+        cli.upload_file(tmp, BUCKET, _key("portal/index.html"),
+                        ExtraArgs={"ContentType": "text/html", "CacheControl": "no-cache"})
+    finally:
+        os.remove(tmp)
+    link = _sign("portal/index.html", "text/html")
+    print(f"  portal: {len(items)} items (valid until {until}) — send THIS one link:\n")
+    print(link)
+    return link
+
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     cmd = sys.argv[1] if len(sys.argv) > 1 else "push"
     if cmd == "url":
         url(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif cmd == "portal":
+        portal()
     else:
         {"push": push, "push-raw": push_raw, "pull-raw": pull_raw, "identity": identity}.get(cmd, push)()

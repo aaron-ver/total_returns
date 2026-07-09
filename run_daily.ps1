@@ -35,6 +35,28 @@ try {
     & $py pipeline.py --push *>&1 | Tee-Object -FilePath $log -Append
     $code = $LASTEXITCODE
     Log "== done (python exit $code) =="
+
+    # ---- HOBBES (Desktop\Hobbes): rates screener refresh + portal publish -------------------
+    # Runs after the linkers pipeline, each step isolated — a Hobbes failure never affects the
+    # linkers refresh. Needs the same logged-in Bloomberg terminal (refresh_store + icap snapshot).
+    $hobbes = "C:\Users\azhang\OneDrive - Verition Fund Management LLC\Desktop\Hobbes"
+    $hpy = Join-Path $hobbes ".venv\Scripts\python.exe"
+    if (Test-Path $hpy) {
+        Log "== HOBBES daily =="
+        try { & $hpy (Join-Path $hobbes "screener\scripts\refresh_store.py") *>&1 |
+              Tee-Object -FilePath $log -Append }
+        catch { Log "HOBBES refresh_store FAILED: $_" }
+        try { & $hpy (Join-Path $hobbes "screener\scripts\render_static.py") *>&1 |
+              Tee-Object -FilePath $log -Append }
+        catch { Log "HOBBES render_static FAILED: $_" }
+        try { & $hpy (Join-Path $hobbes "Vol Pricer\icap_vol_feed.py") --out (
+                Join-Path $hobbes "Vol Pricer\icap_surface.json") *>&1 |
+              Tee-Object -FilePath $log -Append }
+        catch { Log "HOBBES icap snapshot FAILED: $_" }
+        try { & $hpy (Join-Path $hobbes "publish.py") *>&1 | Tee-Object -FilePath $log -Append }
+        catch { Log "HOBBES publish FAILED: $_" }
+        Log "== HOBBES done =="
+    }
 }
 catch {
     Log "FATAL: $_"
