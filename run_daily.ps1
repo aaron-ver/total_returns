@@ -57,6 +57,19 @@ try {
         catch { Log "HOBBES publish FAILED: $_" }
         Log "== HOBBES done =="
     }
+
+    # ---- INFLATION (Desktop\inflation): DTCC tape snapshots -> portal ------------------------
+    # Stdlib + blpapi only, so it runs on THIS venv's python (the repo's own venv is empty).
+    # DTCC data is public internet; DV01 uses live OIS when the terminal is up, else flat-rate.
+    $infl = "C:\Users\azhang\OneDrive - Verition Fund Management LLC\Desktop\inflation"
+    if (Test-Path (Join-Path $infl "snapshot.py")) {
+        Log "== INFLATION tapes =="
+        try { & $py (Join-Path $infl "snapshot.py") *>&1 | Tee-Object -FilePath $log -Append }
+        catch { Log "INFLATION snapshot FAILED: $_" }
+        try { & $py (Join-Path $infl "publish.py") *>&1 | Tee-Object -FilePath $log -Append }
+        catch { Log "INFLATION publish FAILED: $_" }
+        Log "== INFLATION done =="
+    }
 }
 catch {
     Log "FATAL: $_"

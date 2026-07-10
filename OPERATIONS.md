@@ -75,6 +75,19 @@ Everything under `monitors/` shows up in the portal's MONITOR section next time 
 `storage.py portal`. The screener page shows its own as-of date; the vol pricer's ICAP surface is
 a snapshot stamped `asof` (daily by default — re-publish while the feed runs for fresher marks).
 
+**Inflation tapes (Desktop\inflation) — DTCC SDR blotters, snapshot mode.** The live tapes run
+locally (ports 8642/8643); the portal carries full-fidelity STATIC snapshots of that day's tape
+(clean+raw views, package boxes, DV01 widget — identical UI, frozen at snapshot time, banner shows
+the as-of). Also part of the daily scheduled run. Push an updated intraday snapshot **any time**
+(more trades have come in, you want the boss to see them):
+```powershell
+cd "$env:USERPROFILE\OneDrive - Verition Fund Management LLC\Desktop\inflation"
+& "..\total_returns\.venv\Scripts\python.exe" snapshot.py     # re-pull today's DTCC tape (~1 min)
+& "..\total_returns\.venv\Scripts\python.exe" publish.py      # push to the portal
+```
+(Uses the total_returns venv — the inflation repo's own .venv is empty. DV01 shows "live OIS" when
+the terminal is up, else the flat-rate fallback; the banner says which.)
+
 ### 3. When a NEW linker is issued (a brand-new ISIN, a few times/year)
 A **tap/reopening of an existing bond needs no action** — the daily run picks it up automatically.
 Only a **brand-new bond line** needs to be added:
