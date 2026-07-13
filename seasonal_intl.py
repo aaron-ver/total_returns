@@ -27,8 +27,8 @@ CMT_DIR = os.path.join(CACHE, "cmt")
 EXPORTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports", "cmt")
 # Cycle is an EVENT STUDY (anchored on each individual tap, then pooled) -> schedule-agnostic, so it
 # works for gilts too despite their scattered calendar. Only Germany is excluded (no real tap history).
-CYCLE_MKTS = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M"]
-ALL = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M", "DE_EI"]
+CYCLE_MKTS = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M", "JP_JGBI", "AU_TIB", "NZ_IIB"]
+ALL = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M", "DE_EI", "JP_JGBI", "AU_TIB", "NZ_IIB"]
 MET = {"be": "r_BE_bp", "out": "r_linker_bp"}
 W = 21                                                       # compute +/- 21 td (~1 month each side);
 # the dashboard narrows the shown range (10/15/21). NB euro taps are ~21 td apart, so beyond ~+/-10 the
@@ -128,7 +128,10 @@ def auction_cycle(market, bucket, w=W):
     out = _leg_paths(d, "r_linker_bp", apos, offs, z, n)
     if out is None:
         return None
+    kind = (d["auction_method"].astype(str).replace("", "auction").to_numpy()[apos].tolist()
+            if "auction_method" in d else ["auction"] * len(apos))   # synd vs auction per event
     return {"offsets": offs, "dates": [t.strftime("%Y-%m-%d") for t in d.index[apos]],
+            "kind": kind,
             "out": out, "be": _leg_paths(d, "r_BE_bp", apos, offs, z, n),
             "crude": _crude_path(d.index, apos, offs, n)}
 

@@ -28,6 +28,13 @@ stay a scraper / manual upload. This is the map for automating the daily refresh
 | 14 | ES auction/tap history | MANUAL | Banco de España / BOE | `cache_intl/auctions_raw/ES.csv` | ❌ |
 | 15 | UK gilt auction history | MANUAL+SCRAPER | DMO **D5D PDFs** → `gilt_issuance/` → `auctions_intl.py uk_d5d` | `cache_intl/auctions_raw/GB.csv` | ❌ (PDF parse) |
 | 16 | IT auction/tap history | MANUAL | Banca d'Italia *storico aste* | `cache_intl/auctions_raw/IT.csv` | ❌ |
+| 17 | **JP JGBi auction history** | **SCRAPER** | `fetch_auctions_intl.py` — MOF direct xls (stable URL, auto-fetched in the daily pull) | `cache_intl/auctions_raw/JP.csv` | ❌ (public file) |
+| 18 | AU TIB issuance history | MANUAL+parse | AOFM data-hub "Treasury Indexed Bonds – Issuance" xlsx → drop in `cache_intl/auction_sources/au_tib_issuance.xlsx` (site bot-blocks scripts); parse is automated | `cache_intl/auctions_raw/AU.csv` | ❌ |
+| 19 | NZ IIB tender history | MANUAL+parse | NZ Debt Management "Government bonds – tender issuance history" xlsx → `cache_intl/auction_sources/nz_tender_history.xlsx` (site 403s scripts); parse is automated | `cache_intl/auctions_raw/NZ.csv` | ❌ |
+| 19b | **NZ syndication results** (launches + syndicated taps, WITH clearing yields) | MANUAL+parse | debtmanagement.treasury.govt.nz/resource/government-bonds-syndication → `cache_intl/auction_sources/nz_syndications.xlsx`; updates only after a new syndication | merged into `NZ.csv` | ❌ |
+| 19c | German nominal universe (Bund hedge legs, 160 DBRs) | MANUAL | Security Finder export → `nominal_universe/germany_nominals.xls.csv` (imported 2026‑07; OBL/BKO can be added later for denser front-end coverage) | `cache_intl/nominal_universe.csv` | ❌ (screen export) |
+| 20 | JP/AU/NZ linker + nominal px/static | BBG‑DAPI | `data_layer_intl.py` (universe seeded 2026‑07: 12 JGBi, 11 TIB, 5 IIB + JGB/ACGB/NZGB nominal pools) | `cache_intl/` | ✅ eligible |
+| 21 | JP/AU/NZ inflation & financing (JCPNJGBI, AUCPI, NZCPCCPI; TONAR/AONIA/NZOCRS) | BBG‑DAPI | `data_layer_intl.py` (tickers verified on terminal 2026‑07) | `cache_intl/macro*` | ⚠️ verify |
 
 ## Build → artifacts (all cloud‑runnable from the caches; no terminal)
 

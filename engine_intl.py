@@ -25,7 +25,7 @@ import data_layer_intl as dl
 import pricing
 
 CACHE = linkers.CACHE
-CAL_FIN = {"TARGET2": "estr_gc", "UK": "sonia_gc"}    # calendar id -> financing series whose
+CAL_FIN = {"TARGET2": "estr_gc", "UK": "sonia_gc", "JP": "tonar", "AU": "aonia", "NZ": "nzon"}    # calendar id -> financing series whose
 #                                                       publication days define the business days
 
 

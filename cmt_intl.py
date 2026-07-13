@@ -203,7 +203,9 @@ def _pick_nominal(country, lmat, mstart, prev_end):
 
 # ---------------------------------------------------------------- auction calendar ---------------
 def _auctions_by_bucket(market, fr):
-    """Every auction/tap of the market, tagged with the bucket of its remaining tenor at the event."""
+    """Every auction/tap of the market, tagged with the bucket of its remaining tenor at the event
+    + the distribution METHOD (synd = syndicated launch; auction = tender/reopening)."""
+    import auctions_intl
     u = linkers.load_universe(include_deferred=True)
     matof = {i: pd.Timestamp(m) for i, m in zip(u["isin"], pd.to_datetime(u["maturity"]))}
     e = iss.events(); e = e[e["market"] == market].copy()
@@ -211,7 +213,12 @@ def _auctions_by_bucket(market, fr):
     e["rem"] = (e["mat"] - pd.to_datetime(e["event_date"])).dt.days / 365.25
     e["bkt"] = e["rem"].apply(lambda y: bk.bucket(y, fr))
     e["nd"] = pd.to_datetime(e["event_date"]).dt.normalize()
-    return e[["nd", "isin", "amt_bn", "bkt"]].dropna(subset=["bkt"])
+    fim = auctions_intl.first_issue_method()
+    country = linkers.conv(market)["country"]
+    newline_default = "synd" if country in auctions_intl.SYND_NEWLINE_COUNTRIES else "auction"
+    e["method"] = np.where(e["type"] == "new",
+                           e["isin"].map(fim).fillna(newline_default), "auction")
+    return e[["nd", "isin", "amt_bn", "bkt", "method"]].dropna(subset=["bkt"])
 
 
 # ---------------------------------------------------------------- build one bucket ---------------
@@ -284,7 +291,9 @@ def build_bucket(market, b, held_s, grid, auc, country, matof):
     out["auction_amount"] = [round(amt.get(d), 3) if d in amt.index and pd.notna(amt.get(d)) else np.nan for d in nd]
     out["auction_is_held"] = [bool(pd.notna(h) and d in aset and h in iso.get(d, "").split(";"))
                               for d, h in zip(nd, out["linker_isin"].to_numpy())]
-    return out.reindex(columns=CMT_COLS)
+    mth = ab.groupby("nd")["method"].agg(lambda s: "synd" if (s == "synd").any() else "auction")
+    out["auction_method"] = [mth.get(d, "") for d in nd]     # '' on non-auction days
+    return out.reindex(columns=CMT_COLS + ["auction_method"])
 
 
 # ---------------------------------------------------------------- build a market -----------------

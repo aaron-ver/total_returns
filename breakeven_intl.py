@@ -273,8 +273,44 @@ def _pick_example(pairs):
     return max(pairs, key=lambda k: len(pairs[k][1])) if pairs else None
 
 
+def auto_pairs():
+    """Comparators for linkers NOT in the street map (JP/AU/NZ — no desk map exists): the
+    closest-maturity same-country nominal already issued when the linker first traded, from the
+    comprehensive nominal universe. Fixed for the bond's life, mirroring the street-pair spirit;
+    the CMT buckets keep their own contemporaneous re-picked hedge."""
+    mapped = set(load_map()["real_isin"])
+    u = linkers.load_universe()
+    p = os.path.join(CACHE, "nominal_universe.csv")
+    if not os.path.exists(p):
+        return pd.DataFrame(columns=["real_isin", "nominal_isin", "beta", "note"])
+    nu = pd.read_csv(p, parse_dates=["maturity", "issue_date"])
+    rows = []
+    for _, r in u.iterrows():
+        if r["isin"] in mapped:
+            continue
+        country = linkers.conv(r["market"])["country"]
+        cand = nu[(nu["country"] == country) & nu["maturity"].notna()].copy()
+        if cand.empty:
+            continue
+        fi = pd.to_datetime(r["first_issue"]) if pd.notna(r["first_issue"]) else None
+        if fi is not None and cand["issue_date"].notna().any():
+            existed = cand[cand["issue_date"].isna() | (cand["issue_date"] <= fi)]
+            if not existed.empty:
+                cand = existed
+        cand = cand[cand["isin"].map(lambda i: os.path.exists(       # leg needs price history
+            os.path.join(CACHE, "daily", f"{i}.parquet")))]
+        if cand.empty:
+            continue
+        lm = pd.to_datetime(r["maturity"])
+        best = cand.loc[(cand["maturity"] - lm).abs().idxmin()]
+        rows.append({"real_isin": r["isin"], "nominal_isin": best["isin"], "beta": 1.0,
+                     "note": f"auto: closest-maturity {country} nominal at issue "
+                             f"(gap {abs((best['maturity'] - lm).days) / 365.25:.1f}y)"})
+    return pd.DataFrame(rows)
+
+
 def build_all():
-    m = load_map()
+    m = pd.concat([load_map(), auto_pairs()], ignore_index=True)
     if m.empty:
         print(f"  breakeven_map.csv is empty — nothing to build (add rows: real_isin,nominal_isin,beta)"); return []
     built, skipped = [], []

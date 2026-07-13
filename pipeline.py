@@ -60,19 +60,23 @@ def run(label, fn, terminal=False):
 def stage_pull():
     """Live Bloomberg desktop pulls (need the terminal). US TIPS/energy come via their refresh() in
     BUILD; here we pull the intl bonds, the nominal-hedge universe, and crude."""
-    print("\n== PULL (Bloomberg terminal) ==")
-    import data_layer_intl, nominals_intl, crude
+    print("\n== PULL (Bloomberg terminal + public sources) ==")
+    import data_layer_intl, nominals_intl, crude, fetch_auctions_intl
     run("intl bonds (daily + static, incremental)", data_layer_intl.update, terminal=True)
     run("intl nominal-hedge universe", nominals_intl.pull, terminal=True)
     run("crude Brent/WTI (CO/CL)", crude.pull_all, terminal=True)
+    # public debt-office auction files (JP MOF / AOFM / NZDM) — internet only, no terminal
+    run("JP/AU/NZ auction files (public)", lambda: (fetch_auctions_intl.fetch(),
+                                                    fetch_auctions_intl.parse()))
 
 
 def stage_build():
     """Recompute all series from cache. US refresh() pulls too when the terminal is up (else cache)."""
     print("\n== BUILD ==")
-    import engine, energy, crude, hedge
+    import engine, energy, crude, hedge, us_bonds
     import auctions_intl, engine_intl, breakeven_intl, cmt_intl, issuance_intl, buckets_intl
     run("US: TIPS/macro + returns", lambda: engine.refresh(update_data=not NO_PULL))
+    run("US: per-bond returns", us_bonds.build_all)
     run("US: energy (RBOB) series", lambda: energy.refresh(update_data=not NO_PULL))
     run("crude: front-month series", crude.build_all)
     run("US: gasoline hedge ratios", hedge.build_all)

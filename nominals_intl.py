@@ -38,7 +38,7 @@ CACHE = linkers.CACHE
 NOMINAL_DIR = os.path.join(HERE, "nominal_universe")
 UNIVERSE_CSV = os.path.join(CACHE, "nominal_universe.csv")
 ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
-COUNTRIES = {"FR", "IT", "ES", "GB", "DE"}
+COUNTRIES = {"FR", "IT", "ES", "GB", "DE", "JP", "AU", "NZ"}
 
 
 def _find_col(cols, *keys, exclude=()):
@@ -178,6 +178,9 @@ def import_universe():
     except Exception:
         linker_isins = set()
     u = u[~u["isin"].isin(linker_isins)]
+    # AU capital-indexed lines all carry XCL in the ISIN; NZ indexed stock starts NZIIB/NZGIS —
+    # structural catch for old matured linkers that predate our seeded universe
+    u = u[~(u["isin"].str.contains("XCL", na=False) | u["isin"].str.startswith(("NZIIB", "NZGIS")))]
     tick = u["ticker"].astype(str).str.lower()
     u = u[~(tick.str.contains("i ", na=False) | tick.str.contains("€i", na=False)
             | tick.str.contains("i/l", na=False) | tick.str.contains("ils", na=False))]

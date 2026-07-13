@@ -288,6 +288,15 @@ def build():
         print("  no auction data — run linkers.enrich() (new issues) + auctions_intl.pull_reopenings() (taps)")
         return pd.DataFrame()
     allrows = pd.concat(parts, ignore_index=True).sort_values(["country", "isin", "event_date"])
+    # distribution METHOD (synd vs auction): explicit where the raw files say so (dmo
+    # syndication/auction rows); reopenings/taps are auctions; remaining first issues default
+    # by market practice — FR/IT/ES/GB launch new linker lines via syndication, DE auctions all.
+    et = allrows["event_type"].astype(str).str.lower()
+    reo = allrows["reopening"].fillna(False).astype(bool)
+    allrows["method"] = "auction"
+    allrows.loc[~reo & allrows["country"].isin(SYND_NEWLINE_COUNTRIES), "method"] = "synd"
+    allrows.loc[reo | et.isin(["auction", "reopening", "tap"]), "method"] = "auction"
+    allrows.loc[et.str.contains("synd"), "method"] = "synd"
     allrows.to_parquet(OUT)
     nnew = int((allrows["event_type"] == "issue").sum())
     nreopen = int((allrows["reopening"] == True).sum())
@@ -298,10 +307,33 @@ def build():
     return allrows
 
 
+SYND_NEWLINE_COUNTRIES = {"FR", "IT", "ES", "GB", "AU", "NZ"}   # new-line default when no explicit
+# method (these DMOs launch lines via syndication; DE and JP auction everything)
+
+
 def load():
     if not os.path.exists(OUT):
         return build()
     return pd.read_parquet(OUT)
+
+
+def first_issue_method():
+    """{isin: 'synd'|'auction'} for each bond's LAUNCH, preferring the explicit dmo method rows.
+    Reopenings are auctions by construction — this map only matters for new-line events."""
+    a = load()
+    if a.empty:
+        return {}
+    fi = a[~a["reopening"].fillna(False).astype(bool)]
+    out = {}
+    for isin, g in fi.groupby("isin"):
+        et = g["event_type"].astype(str).str.lower()
+        if et.str.contains("synd").any():
+            out[isin] = "synd"
+        elif (et == "auction").any():
+            out[isin] = "auction"
+        else:
+            out[isin] = "synd" if g["country"].iloc[0] in SYND_NEWLINE_COUNTRIES else "auction"
+    return out
 
 
 if __name__ == "__main__":

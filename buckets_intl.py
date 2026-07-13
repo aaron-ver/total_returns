@@ -25,7 +25,8 @@ ORDER = ['2y', '5y', '7y', '10y', '12y', '15y', '20y', '25y', '30y', '40y', '50y
 TARGET = {'2y': 2.5, '5y': 4.5, '7y': 7, '10y': 10, '12y': 12.5, '15y': 15.5,
           '20y': 20, '25y': 25, '30y': 31, '40y': 40, '50y': 50}
 MARKETS = {'IT_BTPEI': 'Italy BTP€i', 'FR_OATEI': 'France OAT€i', 'FR_OATI': 'France OATi',
-           'ES_EI': 'Spain SPGB€i', 'DE_EI': 'Germany Bund€i', 'UK_3M': 'UK gilt'}
+           'ES_EI': 'Spain SPGB€i', 'DE_EI': 'Germany Bund€i', 'UK_3M': 'UK gilt',
+           'JP_JGBI': 'Japan JGBi', 'AU_TIB': 'Australia TIB', 'NZ_IIB': 'New Zealand IIB'}
 FR_STYLE = {'FR_OATEI', 'FR_OATI', 'UK_3M'}        # markets that split the long end into 30/40/50
 YEARS = list(range(2010, 2027))
 

@@ -119,6 +119,32 @@ def build_payload():
     return data
 
 
+def build_bonds_payload():
+    """Per-bond financed outrights for the Bonds view: weekly cum bp per CUSIP on one shared
+    weekly grid (offset-encoded). {grid:[dates], bonds:[{c,l,t,d,m,o,y}]}. Needs us_bonds sheets
+    (pipeline builds them); ships empty if not built yet."""
+    import us_bonds
+    idx = us_bonds.load_index()
+    if idx.empty:
+        return {"grid": [], "bonds": []}
+    grid = pd.date_range(idx["first"].min(), pd.Timestamp.today(), freq="W-FRI")
+    gpos = {d: i for i, d in enumerate(grid)}
+    bonds = []
+    for _, r in idx.sort_values(["leg", "tenor", "maturity"]).iterrows():
+        df = us_bonds.load_bond(r["cusip"])
+        if df is None or df.empty:
+            continue
+        w = df["cum_bp"].resample("W-FRI").last()
+        w = w.loc[w.first_valid_index():w.last_valid_index()].ffill()
+        if len(w) < 3 or w.index[0] not in gpos:
+            continue
+        bonds.append({"c": r["cusip"], "l": r["leg"], "t": r["tenor"], "d": str(r["desc"]),
+                      "m": pd.Timestamp(r["maturity"]).strftime("%Y-%m-%d"),
+                      "o": gpos[w.index[0]],
+                      "y": [round(float(v), 1) for v in w]})
+    return {"grid": [d.strftime("%Y-%m-%d") for d in grid], "bonds": bonds}
+
+
 def plotly_tag():
     """Embed Plotly inline (offline-safe); fall back to the CDN <script> if the fetch fails."""
     try:
@@ -207,7 +233,17 @@ __PLOTLY__
         <button data-range="5y">5Y</button><button data-range="3y">3Y</button></div></div>
     <div class="grp"><label>View</label><div class="seg" id="view">
       <button data-view="chart" class="on">Chart</button><button data-view="table">Table</button>
-      <button data-view="seasonal">Seasonal</button></div></div>
+      <button data-view="seasonal">Seasonal</button><button data-view="bonds">Bonds</button></div></div>
+    <div class="grp cmv"><label>Metric (chart/table)</label><div class="seg" id="cmetric">
+      <button data-cmetric="be" class="on">Breakeven</button><button data-cmetric="tips">TIPS</button>
+      <button data-cmetric="nom">Nominal</button></div></div>
+    <div class="grp bv" style="display:none"><label>Bonds — leg</label><div class="seg" id="bleg">
+      <button data-bleg="tips" class="on">TIPS</button><button data-bleg="nominal">Nominal (UST)</button></div></div>
+    <div class="grp bv" style="display:none"><label>Bonds — tenor</label><div class="seg" id="bten">
+      <button data-bten="all" class="on">All</button><button data-bten="5y">5y</button>
+      <button data-bten="10y">10y</button><button data-bten="30y">30y</button></div></div>
+    <div class="grp bv" style="display:none"><label>Bonds — show</label><div class="seg" id="bact">
+      <button data-bact="active" class="on">Live only</button><button data-bact="all">Incl. matured</button></div></div>
     <div class="grp posv" style="display:none"><label>Position (cumulative) <span class="note" style="padding:0">short = mirror</span></label>
       <div class="seg" id="pos"><button data-pos="long" class="on">Long</button><button data-pos="short">Short</button></div></div>
     <div class="grp rv"><label>Table frequency</label><div class="seg" id="freq">
@@ -302,8 +338,10 @@ __PLOTLY__
 </div>
 <script>
 const DATA = __DATA__;
+const BONDS = __BONDS__;                 // {grid:[weekly dates], bonds:[{c,l,t,d,m,o,y}]} per-bond outrights
 const TENORS = Object.keys(DATA);
-const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", beta:100, gas:"off", gwin:"full", seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
+const S = {tenor: TENORS.includes("10y")?"10y":TENORS[0], tenors:(TENORS.includes("10y")?["10y"]:[TENORS[0]]), xT:3, xU:3, start:null, end:null, view:"chart", freq:"monthly", smetric:"tips", cmetric:"be", bleg:"tips", bten:"all", bact:"active", beta:100, gas:"off", gwin:"full", seasmode:"agg", periods:[1,2,3,4], smonths:[1,2,3,4,5,6,7,8,9,10,11,12], swins:["full"], calend:"start", issue:"all", regpair:"P1>P2", evyear:"all", evn:15, pos:"long"};
+const CMET={be:"breakeven",tips:"TIPS leg",nom:"UST leg"};   // chart/table metric labels
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PCOL=["#bcd4f2","#7fb0e8","#2f81f7","#1b4f8f"];   // aggregate bars: ordered light->dark ramp
 const HCOL=["#4cc9f0","#e63946","#52b788","#c77dff"];   // history lines: high-contrast (overlay-friendly)
@@ -334,9 +372,11 @@ function series(){
   const beta=S.beta/100, gh=gasOn();
   let cl=0,cs=0,cm=0;
   for(let i=lo;i<=hi;i++){
-    const be = d.rT[i]-beta*d.rU[i];                       // breakeven (β-weighted nominal)
-    const slip = S.xT*d.sT[i] + beta*S.xU*d.sU[i];         // repo half-spread (β scales UST cost)
-    let hg=0; if(gh){ const h=hLookup(d.hedge, d.dates[i].slice(0,7), beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
+    const be = S.cmetric==="tips"? d.rT[i] : S.cmetric==="nom"? d.rU[i]
+             : d.rT[i]-beta*d.rU[i];                       // metric: leg outright or breakeven (β-weighted)
+    const slip = S.cmetric==="tips"? S.xT*d.sT[i] : S.cmetric==="nom"? S.xU*d.sU[i]
+               : S.xT*d.sT[i] + beta*S.xU*d.sU[i];         // repo half-spread for the chosen metric
+    let hg=0; if(gh && S.cmetric==="be"){ const h=hLookup(d.hedge, d.dates[i].slice(0,7), beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
     const lbe = be-slip-hg, sbe = -be-slip+hg, mid = be-hg;  // gas: short h vs long BE -> ∓hg
     cl+=lbe; cs+=sbe; cm+=mid;
     o.dates.push(d.dates[i]); o.rT.push(d.rT[i]); o.rU.push(d.rU[i]); o.rBE.push(mid);
@@ -355,21 +395,23 @@ function monthly(s){
 }
 function overlayOK(){ return S.view==="chart" || (S.view==="seasonal" && S.seasmode==="cal"); }  // only Chart & seasonal Calendar overlay tenors
 function applyView(){
-  const seasonal = S.view==="seasonal", mode = S.seasmode;
+  const seasonal = S.view==="seasonal", mode = S.seasmode, bonds = S.view==="bonds";
   if(!overlayOK() && S.tenors.length>1){ S.tenors=[S.tenor]; syncTenorBtns(); }   // collapse to primary where overlay is unsupported
-  $("tennote").textContent = overlayOK() ? "(multi = overlay here)" : "(single tenor in this view)";
+  $("tennote").textContent = overlayOK() ? "(multi = overlay here)" : bonds ? "(bonds view — tenor filter below)" : "(single tenor in this view)";
   document.querySelectorAll(".rv").forEach(e=>e.style.display=seasonal?"none":"");
   document.querySelectorAll(".sv").forEach(e=>e.style.display=seasonal?"":"none");
+  document.querySelectorAll(".cmv").forEach(e=>e.style.display=(!seasonal&&!bonds)?"":"none");   // chart/table metric
+  document.querySelectorAll(".bv").forEach(e=>e.style.display=bonds?"":"none");                  // bonds controls
   document.querySelectorAll(".hv").forEach(e=>e.style.display=(seasonal&&(mode==="hist"||mode==="cum"))?"":"none"); // periods (history/cumul)
   document.querySelectorAll(".mv").forEach(e=>e.style.display=(seasonal&&mode!=="agg")?"":"none");        // month (hist/cal/reg/cum)
   document.querySelectorAll(".cv").forEach(e=>e.style.display=(seasonal&&mode==="cal")?"":"none");        // day-count (calendar)
   document.querySelectorAll(".pv").forEach(e=>e.style.display=(seasonal&&mode==="reg")?"":"none");        // regression picker
   document.querySelectorAll(".ev").forEach(e=>e.style.display=(seasonal&&mode==="event")?"":"none");      // event year + window
   document.querySelectorAll(".posv").forEach(e=>e.style.display=(seasonal||(S.view==="chart"&&S.tenors.length>1))?"":"none"); // long/short (cumulative views)
-  const bev = !seasonal || S.smetric==="be";                            // β / gas hedge / window apply to the breakeven (chart, table, seasonal-BE)
+  const bev = seasonal ? S.smetric==="be" : (!bonds && S.cmetric==="be");   // β / gas hedge / window apply to the breakeven only
   document.querySelectorAll(".bev").forEach(e=>e.style.display=bev?"":"none");
   $("gwingrp").classList.toggle("off", !gasOn());                       // hedge window only matters when gas is on
-  $("chart").style.display=(!seasonal && S.view==="chart")?"":"none";
+  $("chart").style.display=(!seasonal && (S.view==="chart"||bonds))?"":"none";
   $("tablewrap").style.display=(!seasonal && S.view==="table")?"":"none";
   $("seaswrap").style.display=(seasonal&&mode==="agg")?"":"none";
   $("seashist").style.display=(seasonal&&mode==="hist")?"":"none";
@@ -382,18 +424,19 @@ const SEASDRAW={agg:()=>drawSeasonal(),hist:()=>drawHistory(),cal:()=>drawCalend
 function render(){
   applyView();
   if(S.view==="seasonal"){ (SEASDRAW[S.seasmode]||SEASDRAW.agg)(); return; }
+  if(S.view==="bonds"){ drawBonds(); return; }
   const s = series();
   const last = a => a.length?a[a.length-1]:0;
   const win = s.dates.length ? (s.dates[0]+" → "+s.dates[s.dates.length-1]) : "—";
   if(S.view==="chart" && S.tenors.length>1){            // per-tenor long/short-BE totals (slippage applied)
     let h=""; const isS=S.pos==="short", dir=isS?"short":"long";
     for(const t of S.tenors){ const c=cumBEFor(t), arr=isS?c.short:c.long, v=arr.length?arr[arr.length-1]:0;
-      h+="<div class='tot'><span class='lab' style='color:"+TCOL[t]+"'>"+t+" "+dir+"-BE</span><b class='"+(v>=0?"pos":"neg")+"'>"+fmt(v,0)+"</b> bp</div>"; }
+      h+="<div class='tot'><span class='lab' style='color:"+TCOL[t]+"'>"+t+" "+dir+" "+CMET[S.cmetric]+"</span><b class='"+(v>=0?"pos":"neg")+"'>"+fmt(v,0)+"</b> bp</div>"; }
     $("totals").innerHTML=h+"<div class='tot'><span class='lab'>config</span><b style='font-size:12px'>"+cfgLab()+"</b></div>"
       +"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+"</b></div>";
   } else {
-    $("totals").innerHTML="<div class='tot l'><span class='lab'>long breakeven</span><b>"+fmt(last(s.cL),0)+"</b> bp</div>"
-      +"<div class='tot s'><span class='lab'>short breakeven</span><b>"+fmt(last(s.cS),0)+"</b> bp</div>"
+    $("totals").innerHTML="<div class='tot l'><span class='lab'>long "+CMET[S.cmetric]+"</span><b>"+fmt(last(s.cL),0)+"</b> bp</div>"
+      +"<div class='tot s'><span class='lab'>short "+CMET[S.cmetric]+"</span><b>"+fmt(last(s.cS),0)+"</b> bp</div>"
       +"<div class='tot m'><span class='lab'>mid (repo x=0)</span><b>"+fmt(last(s.cM),0)+"</b> bp</div>"
       +"<div class='tot'><span class='lab'>config</span><b style='font-size:12px'>"+cfgLab()+"</b></div>"
       +"<div class='tot'><span class='lab'>window</span><b style='font-size:13px'>"+win+(s.dates.length?" ("+s.dates.length+"d)":"")+"</b></div>";
@@ -407,29 +450,60 @@ function scheduleRender(){                    // slider handler then returns ins
 }                                             // backs up the main thread (the stutter / no-drop cursor)
 function drawChart(s){
   const tr=(y,name,color)=>({x:s.dates,y:y,name:name,mode:"lines",line:{width:1.6,color:color},hovertemplate:"%{y:+.1f} bp<extra>"+name+"</extra>"});
-  const data=[tr(s.cM,"mid","#8b98a5"),tr(s.cL,"long BE","#3fb950"),tr(s.cS,"short BE","#f85149")];
+  const data=[tr(s.cM,"mid","#8b98a5"),tr(s.cL,"long "+CMET[S.cmetric],"#3fb950"),tr(s.cS,"short "+CMET[S.cmetric],"#f85149")];
   const layout={paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
-    title:{text:S.tenor+" breakeven cumulative net P&L (bp, linear-sum) — "+cfgLab(),font:{size:14}},
+    title:{text:S.tenor+" "+CMET[S.cmetric]+" cumulative net P&L (bp, linear-sum) — "+cfgLab(),font:{size:14}},
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
     hovermode:"x unified",legend:{orientation:"h",y:1.08}};
   Plotly.react("chart",data,layout,{responsive:true,displaylogo:false});
 }
 const TCOL={"5y":"#4cc9f0","10y":"#f5a623","30y":"#e63946"};   // tenor colors for overlay
+function drawBonds(){   // per-bond financed outrights (weekly cum bp), one line per bond, colored by tenor
+  const today=new Date().toISOString().slice(0,10), g=BONDS.grid, data=[]; let n=0;
+  for(const b of BONDS.bonds){
+    if(b.l!==S.bleg) continue;
+    if(S.bten!=="all" && b.t!==S.bten) continue;
+    if(S.bact==="active" && b.m<today) continue;
+    const xs=[],ys=[];
+    for(let i=0;i<b.y.length;i++){ const dt=g[b.o+i], v=b.y[i];
+      if(v==null) continue; if(S.start&&dt<S.start) continue; if(S.end&&dt>S.end) continue;
+      xs.push(dt); ys.push(v); }
+    if(xs.length<2) continue;
+    const base=ys[0], yy=ys.map(v=>Math.round((v-base)*10)/10);
+    data.push({x:xs,y:yy,name:b.d,mode:"lines",type:"scattergl",connectgaps:false,
+      line:{width:1.2,color:TCOL[b.t]||"#8b98a5"},
+      hovertemplate:"%{x}  <b>%{y}</b> bp<extra>"+b.d+" ("+b.t+")</extra>"});
+    n++;
+  }
+  const leglab=S.bleg==="tips"?"TIPS":"UST nominal";
+  $("totals").innerHTML="<div class='tot'><span class='lab'>bonds shown</span><b>"+n+"</b></div>"
+    +"<div class='tot'><span class='lab'>leg</span><b style='font-size:13px'>"+leglab+"</b></div>"
+    +"<div class='tot'><span class='lab'>colors</span><b style='font-size:12px'><span style='color:"+TCOL["5y"]+"'>5y</span> <span style='color:"+TCOL["10y"]+"'>10y</span> <span style='color:"+TCOL["30y"]+"'>30y</span></b></div>"
+    +"<div class='tot'><span class='lab'>note</span><b style='font-size:11px'>financed outright bp/100k DV01, weekly, rebased at window start; β/repo/gas not applied here</b></div>";
+  Plotly.react("chart",data,{paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},
+    margin:{l:55,r:20,t:30,b:40},showlegend:false,
+    title:{text:"Individual "+leglab+" bonds — cumulative financed outright (bp/100k DV01, weekly)"+(S.bact==="active"?", live issues":", incl. matured"),font:{size:14}},
+    xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
+    hovermode:"closest"},{responsive:true,displaylogo:false});
+}
 function cumBEFor(tenor){                                       // cumulative LONG- and SHORT-BE (bp; β, repo half-spread & gas hedge applied) over the window
   const d=DATA[tenor], n=d.dates.length; let lo=0,hi=n-1;
   if(S.start){while(lo<n&&d.dates[lo]<S.start)lo++;}
   if(S.end){while(hi>=0&&d.dates[hi]>S.end)hi--;}
   const beta=S.beta/100, gh=gasOn();
   const xs=[],lng=[],sht=[]; let cl=0,cs=0;                     // short = −BE − slip (matches series(): not an exact mirror, the half-spread is a cost both ways)
-  for(let i=lo;i<=hi;i++){ const be=d.rT[i]-beta*d.rU[i], slip=S.xT*d.sT[i]+beta*S.xU*d.sU[i];
-    let hg=0; if(gh){ const h=hLookup(d.hedge,d.dates[i].slice(0,7),beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
+  for(let i=lo;i<=hi;i++){
+    const be = S.cmetric==="tips"? d.rT[i] : S.cmetric==="nom"? d.rU[i] : d.rT[i]-beta*d.rU[i];
+    const slip = S.cmetric==="tips"? S.xT*d.sT[i] : S.cmetric==="nom"? S.xU*d.sU[i]
+               : S.xT*d.sT[i]+beta*S.xU*d.sU[i];
+    let hg=0; if(gh && S.cmetric==="be"){ const h=hLookup(d.hedge,d.dates[i].slice(0,7),beta); if(h!=null) hg=h*(d.g[i]||0)/1e5; }
     cl+=be-slip-hg; cs+=-be-slip+hg; xs.push(d.dates[i]); lng.push(cl); sht.push(cs); }
   return {xs,long:lng,short:sht};   // at x=0/β=100/gas-off long equals the mid breakeven and short is its exact mirror
 }
 function drawChartMulti(){                                      // overlay tenors: one long- or short-BE line each (slider-responsive)
   const isS=S.pos==="short", dir=isS?"short":"long";
   const data=S.tenors.map(t=>{ const c=cumBEFor(t);
-    return {x:c.xs,y:isS?c.short:c.long,name:t+" "+dir+"-BE",mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
+    return {x:c.xs,y:isS?c.short:c.long,name:t+" "+dir+" "+CMET[S.cmetric],mode:"lines",line:{width:1.7,color:TCOL[t]},hovertemplate:t+" %{y:+.1f} bp<extra></extra>"};});
   Plotly.react("chart",data,{paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6edf3"},margin:{l:55,r:20,t:30,b:40},
     title:{text:S.tenors.join(" / ")+" "+dir+" breakeven cumulative (bp) — "+cfgLab()+"; repo half-spread x_TIPS/x_UST applied (set both 0 for mid)",font:{size:14}},
     xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zeroline:true,zerolinecolor:"#3a4a5a",title:"bp"},
@@ -835,7 +909,8 @@ function drawEvent(){
     +"Lines above/below the median are out/under-performers that cycle. Widen ± with the Window slider; pick a year at left.";
 }
 function drawTable(s){
-  const cols=["period","TIPS","UST","BEmid","longBE","shortBE"];
+  const mid=S.cmetric==="be"?"BEmid":CMET[S.cmetric]+" mid";
+  const cols=["period","TIPS","UST",mid,"long","short"];
   let rows, tot=[0,0,0,0,0];
   if(S.freq==="monthly"){ rows=monthly(s); rows.forEach(r=>{for(let k=0;k<5;k++)tot[k]+=r[k+1];}); }
   else {
@@ -875,6 +950,7 @@ tenWrap.querySelectorAll("button").forEach(b=>b.onclick=()=>{ const t=b.dataset.
   syncTenorBtns(); render();});
 seg("view","view"); seg("freq","freq"); seg("smetric","smetric"); seg("seasmode","seasmode");
 seg("issue","issue"); seg("calend","calend"); seg("pos","pos"); seg("gas","gas"); seg("gwin","gwin");
+seg("cmetric","cmetric"); seg("bleg","bleg"); seg("bten","bten"); seg("bact","bact");
 $("speriod").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
   S.periods=[...$("speriod").querySelectorAll("input:checked")].map(x=>+x.value); render(); });
 $("swin").querySelectorAll("input").forEach(cb=>cb.onchange=()=>{
@@ -914,7 +990,8 @@ def build(path=None, open_browser=True):
     path = path or os.path.join(HERE, "dashboard.html")
     html = (HTML
             .replace("__PLOTLY__", plotly_tag())
-            .replace("__DATA__", json.dumps(build_payload(), separators=(",", ":"))))
+            .replace("__DATA__", json.dumps(build_payload(), separators=(",", ":")))
+            .replace("__BONDS__", json.dumps(build_bonds_payload(), separators=(",", ":"))))
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     mb = os.path.getsize(path) / 1e6

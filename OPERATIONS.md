@@ -18,6 +18,7 @@ All commands are run from the project folder in PowerShell, using the venv pytho
 | **Weekly** | Fresh ONE-link portal for your boss (dashboards + research PDFs, 7-day expiry) | `.\.venv\Scripts\python.exe storage.py portal` |
 | **When a new linker is issued** | Add its ISIN, pull, rebuild | edit `linkers.py` → `pipeline.py --stage pull` → `pipeline.py --no-pull --push` |
 | **Occasionally (quarterly-ish)** | Refresh the nominal-hedge universe | Security Finder export → `nominals_intl.py import` → `nominals_intl.py pull` |
+| **Monthly (~2 min)** | Refresh AU + NZ auction files (their sites block scripts; JP is auto-fetched daily) | AOFM data-hub "Treasury Indexed Bonds – Issuance" → save as `cache_intl\auction_sources\au_tib_issuance.xlsx`; NZDM IIB page "tender issuance history" → `nz_tender_history.xlsx`. Parse runs automatically in the daily pull (`fetch_auctions_intl.py` has the links + staleness warnings) |
 | **Anytime** | Run a refresh now (missed a day) | `.\.venv\Scripts\python.exe pipeline.py --push` |
 | **Anytime** | Rebuild + push without Bloomberg | `.\.venv\Scripts\python.exe pipeline.py --no-pull --push` |
 | **If S3 push fails** | Check AWS credentials | `.\.venv\Scripts\python.exe storage.py identity` |

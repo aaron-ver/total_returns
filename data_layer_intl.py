@@ -45,7 +45,8 @@ TODAY = pd.Timestamp.today().strftime("%Y%m%d")
 # (range × bonds × fields) trips Bloomberg's backend timeout. We COMPUTE the index ratio and validate
 # it against BBG's INDEX_RATIO via the cheap recent-window pull_ir_check().
 DAILY_FIELDS = ["PX_CLEAN_MID", "YLD_YTM_MID"]
-IR_XCHECK_FIELDS = ["INDEX_RATIO"]                   # pulled only over a recent window (pull_ir_check)
+IR_XCHECK_FIELDS = ["INDEX_RATIO", "IDX_RATIO"]      # recent-window cross-check; BBG stopped serving
+# INDEX_RATIO history on this path 2026-07 — alternates tried, honest per-batch counts printed
 CHUNK_YEARS = 8                                       # split each bond's daily history into ~8yr windows
 
 
@@ -108,6 +109,8 @@ def pull_macro():
     _ensure_dirs()
     frames = []
     for key, meta in linkers.REF_INDEX.items():
+        if not meta.get("ticker"):
+            print(f"  {key:12s} (no ticker yet — fill in linkers.REF_INDEX before this market can build)"); continue
         h = bbg.history(meta["ticker"], ["PX_LAST"], START, TODAY, periodicity="MONTHLY").get(meta["ticker"], [])
         if not h:
             print(f"  WARN no data for {key} ({meta['ticker']})"); continue
@@ -183,13 +186,28 @@ def daily_reference_index(index_key, settle_dates, lag_months=3, interp=True):
     Returns a Series aligned to settle_dates (NaN where the index months aren't published)."""
     idx = ref_index_series(index_key)
     by_month = {(ts.year, ts.month): float(v) for ts, v in idx.items()}
+    # STEP lookup (interp=False): most recent published month <= anchor. QUARTERLY indices
+    # (AU CPI, NZ CPI) only publish Mar/Jun/Sep/Dec — the capital-index factor holds constant
+    # until the next print, so intermediate months step-fill from the last print. Bounded so a
+    # genuinely unpublished quarter still yields NaN instead of going stale forever.
+    import bisect as _bis
+    _keys = sorted(y * 12 + (m - 1) for (y, m) in by_month)
+
+    def _step_get(y, m, max_back=5):
+        k = y * 12 + (m - 1)
+        j = _bis.bisect_right(_keys, k) - 1
+        if j < 0 or k - _keys[j] > max_back:
+            return None
+        kk = _keys[j]
+        return by_month[(kk // 12, kk % 12 + 1)]
+
     out = {}
     for s in pd.DatetimeIndex(settle_dates):
         m_lo = s - pd.DateOffset(months=lag_months)          # month M-lag (the anchor)
-        a = by_month.get((m_lo.year, m_lo.month))
+        a = by_month.get((m_lo.year, m_lo.month)) if interp else _step_get(m_lo.year, m_lo.month)
         if a is None:
             continue
-        if not interp:                                        # monthly step (8m-lag)
+        if not interp:                                        # monthly/quarterly step
             out[s] = a; continue
         m_hi = s - pd.DateOffset(months=lag_months - 1)       # month M-(lag-1)
         b = by_month.get((m_hi.year, m_hi.month))
@@ -341,6 +359,7 @@ def pull_ir_check(years=3, batch=8, include_deferred=False):
     u = linkers.load_universe(include_deferred=include_deferred)
     isins = u["isin"].tolist()
     bbg.open_session()
+    n_ok = 0
     try:
         for k in range(0, len(isins), batch):
             grp = isins[k:k + batch]
@@ -351,14 +370,22 @@ def pull_ir_check(years=3, batch=8, include_deferred=False):
                 if not rows or not os.path.exists(dp):
                     continue
                 ir = pd.DataFrame(rows); ir["date"] = pd.to_datetime(ir["date"])
-                ir = ir.set_index("date")["INDEX_RATIO"]
+                col = next((f for f in IR_XCHECK_FIELDS if f in ir.columns), None)
+                if col is None:
+                    continue
+                ir = ir.set_index("date")[col]
                 d = pd.read_parquet(dp)
                 d["INDEX_RATIO"] = ir.reindex(d.index)
                 d.to_parquet(dp)
-            print(f"  [{min(k + batch, len(isins))}/{len(isins)}] ir-check merged", flush=True)
+                n_ok += 1
+            print(f"  [{min(k + batch, len(isins))}/{len(isins)}] ir-check: {n_ok} bonds with data so far", flush=True)
     finally:
         bbg.close_session()
-    print("  ir-check done")
+    if n_ok == 0:
+        print("  ir-check: BLOOMBERG RETURNED NO INDEX-RATIO HISTORY for any bond — the cross-check "
+              "is unavailable (engine IR stands on its own; levels were validated offline 2026-07)")
+    else:
+        print(f"  ir-check done: {n_ok}/{len(isins)} bonds merged")
 
 
 def _last_cached_date(isin):

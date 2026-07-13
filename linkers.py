@@ -41,6 +41,10 @@ REF_INDEX = {
     "FR_CPIXT":   dict(ticker="FRCPXTOB Index",  desc="France CPI ex-tobacco NSA (INSEE)"),
     "UK_RPI":     dict(ticker="UKRPI Index",     desc="UK Retail Prices Index NSA (ONS)"),
     "IT_FOIXT":   dict(ticker="ITCPIUNR Index",  desc="Italy FOI ex-tobacco NSA (ISTAT) — for BTP Italia (deferred); VERIFY"),
+    # --- JP/AU/NZ extension (VERIFY every ticker on the terminal before the first pull) ---
+    "JP_CPIXF":   dict(ticker="JCPNJGBI Index",  desc="Japan CPI for Govt CPI Bonds (OFFICIAL JGBi ref series, 2020=100) — CONFIRMED on terminal; check history reaches 2013 on first pull"),
+    "AU_CPI":     dict(ticker="AUCPI Index",     desc="Australia CPI All Groups NSA, QUARTERLY (TIB indexation) — CONFIRMED on terminal (Q3-1948→)"),
+    "NZ_CPI":     dict(ticker="NZCPCCPI Index",  desc="NZ CPI All Groups LEVEL, QUARTERLY (Jun2017=1000, Q2-1914→) — from terminal 2026-07; VERIFY on first pull"),
 }
 
 # Local GC financing (reference_intl §6; bonds finance in own-country GC, no specialness, local ccy).
@@ -56,6 +60,9 @@ FINANCING = {
     "eonia":    dict(ticker="EONIA Index",   ccy="EUR", desc="EONIA O/N — pre-Oct-2019 euro extension (≈€STR+8.5bp)"),
     "sonia_gc": dict(ticker="SONIO/N Index", ccy="GBP", desc="SONIA O/N — gilt GC proxy (back to ~1997)"),
     "gcpool":   dict(ticker="GCPION Index",  ccy="EUR", desc="STOXX GC Pooling EUR ON — secured euro GC (single rate)"),
+    "tonar":    dict(ticker="MUTKCALM Index", ccy="JPY", desc="TONAR uncollateralized O/N call (BOJ, 1992→) — CONFIRMED on terminal"),
+    "aonia":    dict(ticker="RBACOR Index",   ccy="AUD", desc="RBA Interbank Overnight Cash Rate (1976→) — CONFIRMED on terminal"),
+    "nzon":     dict(ticker="NZOCRS Index",   ccy="NZD", desc="RBNZ Official Cash Rate — NZGB GC proxy (plain NZIONA not found; XNZIONA1 is 1M-compounded); VERIFY ticker"),
     "rfr_de":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Germany — core GC (fill ticker from REPF)"),
     "rfr_fr":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate France — core GC (fill ticker from REPF)"),
     "rfr_it":   dict(ticker=None, ccy="EUR", desc="RepoFunds Rate Italy — peripheral GC (fill ticker from REPF)"),
@@ -94,6 +101,22 @@ MARKETS = {
     "UK_3M":    dict(country="GB", program="UKTi (3m-lag)",index="UK_RPI",     freq=2, settle_lag=1,
                      calendar="UK",      floor=False, quote="real",      ccy="GBP", repo="sonia_gc",
                      lag_months=3, interp=True),
+    # --- JP/AU/NZ extension — ACTIVE once their SEED_UNIVERSE rows are filled in (below).
+    # Conventions to VERIFY on the terminal against reference_intl-style checks before first build:
+    # JGBi: new-style (series 17+, 2013→) have a par deflation floor at redemption; monthly CPI,
+    #       10-business-day publication lag ≈ 3-month reference lag, daily interp (TIPS-style).
+    # AU TIB: capital-indexed, QUARTERLY coupons; K-factor steps once a quarter off CPI two
+    #       quarters prior (≈ 6m lag, NO daily interpolation — interp=False).
+    # NZ IIB: capital-indexed like TIB; quarterly coupons; ≈ 3m lag, step indexation.
+    "JP_JGBI":  dict(country="JP", program="JGBi (new-style)", index="JP_CPIXF", freq=2, settle_lag=1,
+                     calendar="JP",      floor=True,  quote="real",      ccy="JPY", repo="tonar",
+                     lag_months=3, interp=True),
+    "AU_TIB":   dict(country="AU", program="ACGB TIB",        index="AU_CPI",   freq=4, settle_lag=2,
+                     calendar="AU",      floor=False, quote="real",      ccy="AUD", repo="aonia",
+                     lag_months=6, interp=False),
+    "NZ_IIB":   dict(country="NZ", program="NZGB IIB",        index="NZ_CPI",   freq=4, settle_lag=2,
+                     calendar="NZ",      floor=False, quote="real",      ccy="NZD", repo="nzon",
+                     lag_months=6, interp=False),  # DES: "linked to the LAST 2 QoQ chg" -> 2-quarter lag, TIB-style
     # --- deferred (structurally different; catalogued, not run in Phase 1) ---
     "UK_8M":    dict(country="GB", program="UKTi (8m-lag)",index="UK_RPI",     freq=2, settle_lag=1,
                      calendar="UK",      floor=False, quote="nominal",   ccy="GBP", repo="sonia_gc",
@@ -122,7 +145,8 @@ def active_markets():
 
 # Own-country GC repo per country (reference_intl §6): core (DE/FR) vs peripheral (IT/ES) euro GC via
 # CME RepoFunds Rate; gilts via SONIA. Applied to the active markets (deferred keep their default).
-REPO_BY_COUNTRY = {"FR": "rfr_fr", "DE": "rfr_de", "IT": "rfr_it", "ES": "rfr_es", "GB": "sonia_gc"}
+REPO_BY_COUNTRY = {"FR": "rfr_fr", "DE": "rfr_de", "IT": "rfr_it", "ES": "rfr_es", "GB": "sonia_gc",
+                   "JP": "tonar", "AU": "aonia", "NZ": "nzon"}
 for _m, _c in MARKETS.items():
     if not _c.get("deferred"):
         _c["repo"] = REPO_BY_COUNTRY.get(_c["country"], _c.get("repo"))
@@ -138,6 +162,9 @@ NOMINAL_MARKETS = {
     "IT": dict(calendar="TARGET2", settle_lag=2, repo="rfr_it",   freq_default=2),
     "ES": dict(calendar="TARGET2", settle_lag=2, repo="rfr_es",   freq_default=1),
     "GB": dict(calendar="UK",      settle_lag=1, repo="sonia_gc", freq_default=2),
+    "JP": dict(calendar="JP",      settle_lag=1, repo="tonar",    freq_default=2),
+    "AU": dict(calendar="AU",      settle_lag=2, repo="aonia",    freq_default=2),
+    "NZ": dict(calendar="NZ",      settle_lag=2, repo="nzon",     freq_default=2),
 }
 
 
@@ -164,6 +191,46 @@ def country_of_isin(isin):
 # Columns: isin, market, cpn, maturity (YYYY-MM-DD), first_issue (YYYY-MM-DD or ""), desc
 # ===========================================================================================
 SEED_UNIVERSE = [
+    # ---- JP/AU/NZ: FILL FROM THE TERMINAL (Security Finder / SRCH), then run the pull. Format:
+    # ("<ISIN>", "JP_JGBI", <cpn>, "<maturity YYYY-MM-DD>", "<first_issue YYYY-MM-DD>", "<desc>"),
+    # ("<ISIN>", "AU_TIB",  ...),   ("<ISIN>", "NZ_IIB", ...),
+    # JGBi: new-style series #17+ only (2013→). TIB: all lines (~8). NZ IIB: all lines (~4).
+    # ---- Japan JGBi, new-style (deflation floor; series 17+). From SRCH 2026-07-10. ----
+    ("JP1120171DA4", "JP_JGBI", 0.100, "2023-09-10", "2013-10-10", "JGBI 0.1 09/10/23"),
+    ("JP1120211G41", "JP_JGBI", 0.100, "2026-03-10", "2016-04-14", "JGBI 0.1 03/10/26"),
+    ("JP1120221H48", "JP_JGBI", 0.100, "2027-03-10", "2017-04-13", "JGBI 0.1 03/10/27"),
+    ("JP1120231J51", "JP_JGBI", 0.100, "2028-03-10", "2018-05-11", "JGBI 0.1 03/10/28"),
+    ("JP1120241K56", "JP_JGBI", 0.100, "2029-03-10", "2019-05-13", "JGBI 0.1 03/10/29"),
+    ("JP1120251L52", "JP_JGBI", 0.200, "2030-03-10", "2020-05-11", "JGBI 0.2 03/10/30"),
+    ("JP1120261M59", "JP_JGBI", 0.005, "2031-03-10", "2021-05-18", "JGBI 0.005 03/10/31"),
+    ("JP1120271N56", "JP_JGBI", 0.005, "2032-03-10", "2022-05-17", "JGBI 0.005 03/10/32"),
+    ("JP1120281P52", "JP_JGBI", 0.005, "2033-03-10", "2023-05-24", "JGBI 0.005 03/10/33"),
+    ("JP1120291Q59", "JP_JGBI", 0.005, "2034-03-10", "2024-05-21", "JGBI 0.005 03/10/34"),
+    ("JP1120301R56", "JP_JGBI", 0.005, "2035-03-10", "2025-05-23", "JGBI 0.005 03/10/35"),
+    ("JP1120311S53", "JP_JGBI", 0.600, "2036-03-10", "2026-05-07", "JGBI 0.6 03/10/36"),
+    # ---- Australia TIB (capital-indexed, quarterly cpn). From SRCH 2026-07-10; pre-2011
+    # maturities (98/05/10CI + old indexed stock) excluded — before the analysis window. ----
+    ("AU0000XCLWD4", "AU_TIB", 4.000, "2015-08-20", "1994-05-18", "TIB 4 08/20/15 (15CI)"),
+    ("AU000XCLWAJ6", "AU_TIB", 1.000, "2018-11-21", "2014-05-02", "TIB 1 11/21/18 (18CI)"),
+    ("AU0000XCLWE2", "AU_TIB", 4.000, "2020-08-20", "1996-10-14", "TIB 4 08/20/20 (20CI)"),
+    ("AU000XCLWAB3", "AU_TIB", 1.250, "2022-02-21", "2012-02-28", "TIB 1.25 02/21/22 (22CI)"),
+    ("AU0000XCLWP8", "AU_TIB", 3.000, "2025-09-20", "2009-10-08", "TIB 3 09/20/25 (25CI)"),
+    ("AU000XCLWAV1", "AU_TIB", 0.750, "2027-11-21", "2017-08-31", "TIB 0.75 11/21/27 (27CI)"),
+    ("AU0000XCLWV6", "AU_TIB", 2.500, "2030-09-20", "2010-09-21", "TIB 2.5 09/20/30 (30CI)"),
+    ("AU0000171134", "AU_TIB", 0.250, "2032-11-21", "2021-08-31", "TIB 0.25 11/21/32 (32CI)"),
+    ("AU000XCLWAF4", "AU_TIB", 2.000, "2035-08-21", "2013-10-03", "TIB 2 08/21/35 (35CI)"),
+    ("AU000XCLWAO6", "AU_TIB", 1.250, "2040-08-21", "2015-08-20", "TIB 1.25 08/21/40 (40CI)"),
+    ("AU0000024044", "AU_TIB", 1.000, "2050-02-21", "2018-09-25", "TIB 1 02/21/50 (50CI)"),
+    # ---- New Zealand IIB. Export only caught the matured 1995 line; the four CURRENT lines
+    # (2% 09/25, 3% 09/30, 2.5% 09/35, 2.5% 09/40) still need ISINs — click each on the NZ
+    # monitor (Inflation Bonds box) -> DES, then add rows here. ----
+    ("NZIIBD0216R7", "NZ_IIB", 4.500, "2016-02-15", "1995-11-28", "NZIIB 4.5 02/15/16"),
+    # current IIB lines — from DES 2026-07-10 (first_issue = 1st settle date)
+    ("NZIIBDT002C2", "NZ_IIB", 2.000, "2025-09-20", "2012-10-31", "NZGBI 2 09/20/25"),
+    ("NZIIBDT003C0", "NZ_IIB", 3.000, "2030-09-20", "2013-10-16", "NZGBI 3 09/20/30"),
+    ("NZIIBDT004C8", "NZ_IIB", 2.500, "2035-09-20", "2014-11-13", "NZGBI 2.5 09/20/35"),
+    ("NZIIBDT005C5", "NZ_IIB", 2.500, "2040-09-20", "2017-03-10", "NZGBI 2.5 09/20/40"),
+    ("NZIIBDT006C3", "NZ_IIB", 3.250, "2050-09-20", "2025-09-22", "NZGBI 3.25 09/20/50"),
     # isin,            market,     cpn,    maturity,     first_issue,   desc
     # ---- France OAT€i (euro HICPxt, annual) ----
     ("FR0011008705", "FR_OATEI", 1.85, "2027-07-25", "2010-07-25", "OATEI 1.85 07/25/27"),

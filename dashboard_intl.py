@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = linkers.CACHE
 CMT_DIR = os.path.join(CACHE, "cmt")
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
-MKT_ORDER = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M", "DE_EI"]
+MKT_ORDER = ["IT_BTPEI", "FR_OATEI", "FR_OATI", "ES_EI", "UK_3M", "DE_EI", "JP_JGBI", "AU_TIB", "NZ_IIB"]
 
 
 def _weekly(s):
@@ -72,12 +72,19 @@ def build_payload(hedge_map=None):
             if ot is None:
                 continue
             be = _weekly(d["cum_BE_bp"]) if ("r_BE_bp" in d and d["r_BE_bp"].notna().any()) else None
+            # standalone nominal leg, MASKED to where a hedge bond actually existed — early history
+            # has cum_nominal_bp frozen at 0 before the first nominal, which would draw a fake flat line
+            nom = None
+            if "r_nominal_bp" in d and d["r_nominal_bp"].notna().any():
+                fv = d["r_nominal_bp"].first_valid_index()
+                nom = _weekly(d.loc[d.index >= fv, "cum_nominal_bp"])
             slipL = _slip(d.get("linker_fin_bp"), d.get("gc_repo"))
             slipN = _slip(d.get("nominal_fin_bp"), d.get("gc_repo")) if be is not None else None
             crudeB = hedge_map.get(m, {}).get(b)
             crudeCum = _ser(crude_cum_w, ot.index) if (crude_cum_w is not None and crudeB) else None
             entry["buckets"][b] = {"x": [t.strftime("%Y-%m-%d") for t in ot.index],
                                    "out": _ser(ot, ot.index), "be": _ser(be, ot.index) if be is not None else None,
+                                   "nom": _ser(nom, ot.index) if nom is not None else None,
                                    "slipL": _ser(slipL, ot.index) if slipL is not None else None,
                                    "slipN": _ser(slipN, ot.index) if slipN is not None else None,
                                    "crudeB": crudeB, "crudeCum": crudeCum}
@@ -91,15 +98,18 @@ def build_payload(hedge_map=None):
             ot = _weekly(rr["bp"].cumsum())
             if ot is None:
                 continue
-            be = None; slipN = None
+            be = None; nom = None; slipN = None
             slipL = _slip(rr.get("fin_bp"), rr.get("gc"))
             bpath = os.path.join(CACHE, "breakeven", f"{isin}.parquet")
             if os.path.exists(bpath):
                 bb = pd.read_parquet(bpath)
                 if "cum_BE_bp" in bb:
                     be = _weekly(bb["cum_BE_bp"]); slipN = _slip(bb.get("nominal_fin_bp"), bb.get("gc_repo"))
+                if "cum_nominal_bp" in bb and bb.get("r_nominal_bp") is not None:
+                    nom = _weekly(bb["cum_nominal_bp"])          # per-bond BE sheets span the pair only
             entry["bonds"][isin] = {"label": str(r["desc"]), "x": [t.strftime("%Y-%m-%d") for t in ot.index],
                                     "out": _ser(ot, ot.index), "be": _ser(be, ot.index) if be is not None else None,
+                                    "nom": _ser(nom, ot.index) if nom is not None else None,
                                     "slipL": _ser(slipL, ot.index) if slipL is not None else None,
                                     "slipN": _ser(slipN, ot.index) if slipN is not None else None}
         if entry["buckets"] or entry["bonds"]:
@@ -164,10 +174,13 @@ table.stt td:first-child,table.stt th:first-child{text-align:left}
     <button data-d="mean" class="on">Mean</button><button data-d="box">Box</button><button data-d="regress">Regress</button></div></div>
   <div class="grp" id="sampgrp" style="display:none"><label>Sample window</label><div class="seg" id="samp">
     <button data-s="full" class="on">Full</button><button data-s="5y">5Y</button><button data-s="3y">3Y</button></div></div>
+  <div class="grp" id="evkindgrp" style="display:none"><label>Events</label><div class="seg" id="evkind">
+    <button data-k="all" class="on">All</button><button data-k="auction">Auctions</button><button data-k="synd">Synd</button></div>
+    <div class="note" style="padding:2px 0 0">syndicated launches vs auction taps — very different size/liquidity</div></div>
   <div class="grp" id="energygrp" style="display:none"><label class="chk" style="text-transform:none;font-size:12px;color:var(--ink)"><input type="checkbox" id="energy"> Energy hedge (Brent)</label>
     <div class="note" style="padding:2px 0 0">subtract h·Brent$; h = full‑sample crude β (contracts)</div></div>
   <div class="grp"><label>Metric</label><div class="seg" id="metric">
-    <button data-m="be" class="on">Breakeven</button><button data-m="out">Outright</button></div></div>
+    <button data-m="be" class="on">Breakeven</button><button data-m="out">Outright</button><button data-m="nom">Nominal</button></div></div>
   <div class="grp" id="betagrp"><label>Hedge β <span class="hl" id="bv">1.00</span></label>
     <input type="range" id="beta" min="0" max="1.5" step="0.05" value="1">
     <div class="note" style="padding:2px 0 0">BE = linker − β·nominal (β=1 = equal DV01)</div></div>
@@ -194,7 +207,7 @@ const COLORS = ["#2f81f7","#3fb950","#e3b341","#f0883e","#db61a2","#a371f7","#56
                 "#7ee787","#ffa657","#bc8cff","#79c0ff","#d29922","#ff7b72","#39c5cf","#e6edf3"];
 const BORDER=["2y","5y","7y","10y","12y","15y","20y","25y","30y","40y","50y"];
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", cycw:10, samp:"full", cycdisp:"mean", beta:1, energy:false, pos:"long", start:null, end:null, xL:0, xN:0, regpair:"P2>P3", sel:{}};
+const S = {market:ORDER[0], view:"cum", group:"buckets", metric:"be", cycw:10, samp:"full", evkind:"all", cycdisp:"mean", beta:1, energy:false, pos:"long", start:null, end:null, xL:0, xN:0, regpair:"P2>P3", sel:{}};
 const PLBL={P1:"P1 (−10→−5)", P2:"P2 (−5→0)", P3:"P3 (0→+5)", P4:"P4 (+5→+10)"};
 
 function curItems(){
@@ -222,9 +235,14 @@ const LAY=()=>({paper_bgcolor:"#0f1419",plot_bgcolor:"#0f1419",font:{color:"#e6e
   margin:{l:58,r:18,t:10,b:40},showlegend:false,hovermode:"x unified",
   xaxis:{gridcolor:"#2d3a48"},yaxis:{gridcolor:"#2d3a48",zerolinecolor:"#3d4a58"}});
 function note(t){ Plotly.react("chart",[],{...LAY(),annotations:[{text:t,showarrow:false,font:{color:"#8b98a5",size:14},x:0.5,y:0.5,xref:"paper",yref:"paper"}]}); }
-const mlab=()=> S.metric==="be"?"breakeven":"outright";
+const mlab=()=> S.metric==="be"?"breakeven":(S.metric==="nom"?"nominal leg":"outright");
 // breakeven at chosen beta from cumulative legs: BE(beta) = cum_linker - beta*cum_nominal = out - beta*(out-be)
 function beBeta(o,b){ return o.map((v,i)=> (v==null||!b||b[i]==null)?null : Math.round((v-S.beta*(v-b[i]))*100)/100); }
+// metric value from the (out, be@beta1) pair: out = linker leg; nom = nominal leg (= out-be at beta 1); be = out-beta*(out-be)
+function mval(o,b){ if(o==null) return null; if(S.metric==="out") return o; if(b==null) return null;
+  return S.metric==="nom" ? o-b : o-S.beta*(o-b); }
+// crude-hedge coefficient per metric: linker leg bL, nominal leg bN, BE = bL - beta*bN
+function hcoef(cB){ return S.metric==="out"?cB[0] : S.metric==="nom"?cB[1] : (cB[0]-S.beta*cB[1]); }
 function perf(cum){   // Sharpe/ann-ret/vol/maxDD/hit from a weekly cumulative-bp series (rf=0)
   const v=cum.filter(c=>c!=null); if(v.length<4) return null;
   const r=[]; for(let i=1;i<v.length;i++) r.push(v[i]-v[i-1]);
@@ -236,15 +254,16 @@ function perf(cum){   // Sharpe/ann-ret/vol/maxDD/hit from a weekly cumulative-b
           mdd:Math.round(mdd), hit:Math.round(r.filter(x=>x>0).length/r.length*100)};
 }
 function pctile(a,p){ if(!a.length) return null; const x=(a.length-1)*p/100, lo=Math.floor(x), hi=Math.ceil(x); return lo===hi?a[lo]:a[lo]+(a[hi]-a[lo])*(x-lo); }
+const kindOK=(obj,e)=> S.evkind==="all" || ((obj.kind&&obj.kind[e])||"auction")===S.evkind;
 function cycStats(obj){   // client-side per-offset distribution over taps in the sample window, at beta
   const offs=obj.offsets, cut=SEAS.sampcut[S.samp], evs=[];
-  for(let e=0;e<obj.dates.length;e++){ if(!cut || obj.dates[e]>=cut) evs.push(e); }
+  for(let e=0;e<obj.dates.length;e++){ if((!cut || obj.dates[e]>=cut) && kindOK(obj,e)) evs.push(e); }
   const cB=obj.crudeB, hedge=S.energy && cB && obj.crude;   // Brent energy hedge (per-event crude path)
   const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:evs.length};
   for(let k=0;k<offs.length;k++){ const vals=[];
     for(const e of evs){ const o=obj.out[e][k], b=obj.be?obj.be[e][k]:null;
-      let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
-      if(hedge){ const cr=obj.crude[e][k]; if(cr!=null){ const h=S.metric==="out"?cB[0]:(cB[0]-S.beta*cB[1]); v=v-h*cr/1e5; } }
+      let v=mval(o,b); if(v==null) continue;
+      if(hedge){ const cr=obj.crude[e][k]; if(cr!=null){ v=v-hcoef(cB)*cr/1e5; } }
       vals.push(v); }
     if(!vals.length){ ["mean","med","q1","q3","lo","hi"].forEach(s=>R[s].push(null)); continue; }
     vals.sort((a,b)=>a-b);
@@ -264,9 +283,10 @@ function cycPeriods(obj){   // per tap (in window), the 4 period returns from th
   const need=[-10,-5,0,5,10].map(k=>offs.indexOf(k)); const ev=[];
   if(need.some(i=>i<0)) return ev;
   for(let e=0;e<obj.dates.length;e++){ if(cut && obj.dates[e]<cut) continue;
+    if(!kindOK(obj,e)) continue;
     const val=k=>{ const o=obj.out[e][k], b=obj.be?obj.be[e][k]:null;
-      let v; if(S.metric==="out"){ if(o==null) return null; v=o; } else { if(o==null||b==null) return null; v=o-S.beta*(o-b); }
-      if(hedge){ const cr=obj.crude[e][k]; if(cr!=null){ const h=S.metric==="out"?cB[0]:(cB[0]-S.beta*cB[1]); v=v-h*cr/1e5; } } return v; };
+      let v=mval(o,b); if(v==null) return null;
+      if(hedge){ const cr=obj.crude[e][k]; if(cr!=null){ v=v-hcoef(cB)*cr/1e5; } } return v; };
     const p=need.map(val); if(p.some(x=>x==null)) continue;
     ev.push({P1:p[1]-p[0], P2:p[2]-p[1], P3:p[3]-p[2], P4:p[4]-p[3]}); }
   return ev;
@@ -277,8 +297,8 @@ function calStats(obj){   // client-side per-calendar-month distribution across 
   for(let mo=1;mo<=12;mo++) bym[mo]=[];
   for(let e=0;e<obj.ym.length;e++){ const y=obj.ym[e]; if(cutm && y<cutm) continue;
     const o=obj.out[e], b=obj.be?obj.be[e]:null;
-    let v; if(S.metric==="out"){ if(o==null) continue; v=o; } else { if(o==null||b==null) continue; v=o-S.beta*(o-b); }
-    if(hedge){ const cr=cm[y]; if(cr!=null){ const h=S.metric==="out"?cB[0]:(cB[0]-S.beta*cB[1]); v=v-h*cr/1e5; } }
+    let v=mval(o,b); if(v==null) continue;
+    if(hedge){ const cr=cm[y]; if(cr!=null){ v=v-hcoef(cB)*cr/1e5; } }
     bym[+y.slice(5,7)].push(v); yrs.add(y.slice(0,4)); }
   const R={mean:[],med:[],q1:[],q3:[],lo:[],hi:[],n:yrs.size};
   for(let mo=1;mo<=12;mo++){ const vals=bym[mo].slice().sort((a,b)=>a-b);
@@ -295,6 +315,7 @@ function render(){
   document.getElementById("dispgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
   document.querySelector('#cycdisp button[data-d="regress"]').style.display = S.view==="cycle"?"":"none";
   document.getElementById("sampgrp").style.display = (S.view==="cycle"||S.view==="cal")?"":"none";
+  document.getElementById("evkindgrp").style.display = S.view==="cycle"?"":"none";
   document.getElementById("betagrp").style.display = S.metric==="be"?"":"none";
   document.getElementById("energygrp").style.display = (S.view==="cal"||S.view==="cycle"||(S.view==="cum"&&S.group==="buckets"))?"":"none";
   document.getElementById("posgrp").style.display = S.view==="cum"?"":"none";
@@ -338,12 +359,16 @@ function render(){
       }
       tot.push([lab,Math.round(st.mean.reduce((a,v)=>a+(v||0),0)),c, st.n]);
     }else{
-      let xs=obj.x, y = S.metric==="out"? obj.out.slice() : beBeta(obj.out, obj.be);
+      let xs=obj.x, y = S.metric==="out"? obj.out.slice()
+                      : S.metric==="nom"? (obj.nom? obj.nom.slice() : obj.out.map(()=>null))
+                      : beBeta(obj.out, obj.be);
       if(S.xL||S.xN){ const sL=obj.slipL, sN=obj.slipN;    // repo half-spread: pay more on long leg / earn less on short
-        y = y.map((v,i)=>{ if(v==null) return null; let a=v; if(sL&&sL[i]!=null) a-=S.xL/100*sL[i];
-          if(S.metric!=="out" && sN && sN[i]!=null) a-=S.beta*S.xN/100*sN[i]; return a; }); }
+        y = y.map((v,i)=>{ if(v==null) return null; let a=v;
+          if(S.metric!=="nom" && sL && sL[i]!=null) a-=S.xL/100*sL[i];
+          if(S.metric==="be"  && sN && sN[i]!=null) a-=S.beta*S.xN/100*sN[i];
+          if(S.metric==="nom" && sN && sN[i]!=null) a-=S.xN/100*sN[i]; return a; }); }
       if(S.energy && obj.crudeB && obj.crudeCum){          // Brent energy hedge: subtract h * cumulative crude
-        const cc=obj.crudeCum, h=S.metric==="out"?obj.crudeB[0]:(obj.crudeB[0]-S.beta*obj.crudeB[1]);
+        const cc=obj.crudeCum, h=hcoef(obj.crudeB);
         y = y.map((v,i)=> (v==null||cc[i]==null)?v : v - h*cc[i]/1e5); }
       if(S.start||S.end){ const nx=[],ny=[]; for(let j=0;j<xs.length;j++){ if((!S.start||xs[j]>=S.start)&&(!S.end||xs[j]<=S.end)){ nx.push(xs[j]); ny.push(y[j]); } } xs=nx; y=ny; }
       let base=null; for(const v of y){ if(v!=null){ base=v; break; } }        // rebase to window start
@@ -400,6 +425,7 @@ document.querySelectorAll("#group button").forEach(b=>b.onclick=()=>{setSeg("gro
 document.querySelectorAll("#metric button").forEach(b=>b.onclick=()=>{setSeg("metric","m",b.dataset.m,"metric");render();});
 document.querySelectorAll("#cycwin button").forEach(b=>b.onclick=()=>{document.querySelectorAll("#cycwin button").forEach(x=>x.classList.toggle("on",x===b));S.cycw=+b.dataset.w;render();});
 document.querySelectorAll("#samp button").forEach(b=>b.onclick=()=>{setSeg("samp","s",b.dataset.s,"samp");render();});
+document.querySelectorAll("#evkind button").forEach(b=>b.onclick=()=>{setSeg("evkind","k",b.dataset.k,"evkind");render();});
 document.querySelectorAll("#cycdisp button").forEach(b=>b.onclick=()=>{setSeg("cycdisp","d",b.dataset.d,"cycdisp");render();});
 document.getElementById("beta").oninput=e=>{S.beta=+e.target.value; document.getElementById("bv").textContent=S.beta.toFixed(2); render();};
 document.getElementById("energy").onchange=e=>{S.energy=e.target.checked; render();};
