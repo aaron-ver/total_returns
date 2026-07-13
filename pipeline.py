@@ -102,9 +102,10 @@ def stage_export():
 def stage_render():
     """Regenerate the self-contained dashboards (no browser open in a pipeline run)."""
     print("\n== RENDER (dashboards) ==")
-    import dashboard, dashboard_intl
+    import dashboard, dashboard_intl, eventstudio_intl
     run("US dashboard.html", lambda: dashboard.build(open_browser=False))
     run("intl dashboard_intl.html", lambda: dashboard_intl.build(open_browser=False))
+    run("event studio (eventstudio.html)", lambda: eventstudio_intl.build(open_browser=False))
 
 
 def stage_push():
