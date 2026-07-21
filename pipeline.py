@@ -68,6 +68,11 @@ def stage_pull():
     # public debt-office auction files (JP MOF / AOFM / NZDM) — internet only, no terminal
     run("JP/AU/NZ auction files (public)", lambda: (fetch_auctions_intl.fetch(),
                                                     fetch_auctions_intl.parse()))
+    # eventflow: hourly futures bars (Yahoo) + headline series (GDELT) — internet only
+    from eventflow import pull_bars as ef_bars, pull_news as ef_news, pull_news_sources as ef_arts
+    run("eventflow: futures bars (Yahoo)", ef_bars.pull_all)
+    run("eventflow: headlines (GDELT)", ef_news.pull_all)
+    run("eventflow: articles (NYT/Guardian)", ef_arts.pull_daily)
 
 
 def stage_build():
@@ -106,6 +111,8 @@ def stage_render():
     run("US dashboard.html", lambda: dashboard.build(open_browser=False))
     run("intl dashboard_intl.html", lambda: dashboard_intl.build(open_browser=False))
     run("event studio (eventstudio.html)", lambda: eventstudio_intl.build(open_browser=False))
+    from eventflow import dashboard_eventflow
+    run("eventflow dashboard (eventflow.html)", lambda: dashboard_eventflow.build(open_browser=False))
 
 
 def stage_push():

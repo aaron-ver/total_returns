@@ -29,7 +29,8 @@ PREFIX = os.environ.get("LINKERS_S3_PREFIX", "").strip("/")
 DIRS = {"marts": "marts", "exports": "exports", "plots": "plots"}
 FILES = {"dashboard_intl.html": "dashboards/dashboard_intl.html",
          "dashboard.html": "dashboards/dashboard.html",
-         "eventstudio.html": "dashboards/eventstudio.html"}
+         "eventstudio.html": "dashboards/eventstudio.html",
+         "eventflow.html": "dashboards/eventflow.html"}
 
 # The RAW pulled caches. Pushed by the TERMINAL box right after the Bloomberg pull; pulled by a
 # headless/cloud box (or any teammate) before BUILD — so the compile can run anywhere, not just
@@ -227,6 +228,9 @@ PORTAL_ITEMS = [
      "seasonality, Brent energy hedge, performance stats."),
     ("dashboards/dashboard.html", "US TIPS dashboard",
      "US fixed-maturity breakevens - cumulative returns, seasonality, gasoline hedge."),
+    ("dashboards/eventflow.html", "Event Flow - weekend de-risking",
+     "Weekend/headline de-risking study: clock-window returns (Thu->London close, weekend gap), "
+     "curve vs parallel, headline clock. Hourly futures, 2024->."),
     ("dashboards/eventstudio.html", "Event Studio - supply events",
      "Cross-asset auction/syndication event analysis: concessions & snap-backs, outright / BE / "
      "vs matched Bund/UST / curve / fly, by market, method and tenor."),
