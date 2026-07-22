@@ -236,6 +236,17 @@ PORTAL_ITEMS = [
      "vs matched Bund/UST / curve / fly, by market, method and tenor."),
 ]
 
+# Truly-live services (ECS) — direct internal URLs, not S3 artifacts. Reachable on the
+# corporate network/VPN only (internal ALB + private DNS).
+LIVE_LINKS = [
+    ("DTCC inflation swaps tape — LIVE", "Real-time cleared inflation swap prints "
+     "(intraday tape, packages, DV01). ECS service — corporate network required.",
+     "https://dtcc-tapes.veritionfund.cloud/", "LIVE"),
+    ("DTCC rates options tape — LIVE", "Real-time cleared rates-options prints "
+     "(structures, families). ECS service — corporate network required.",
+     "https://dtcc-tapes.veritionfund.cloud/options", "LIVE"),
+]
+
 
 def portal(days=7):
     """ONE link for everything: builds a small index page linking every dashboard + research PDF
@@ -265,9 +276,13 @@ def portal(days=7):
             items.append((title, desc, _sign(key, "text/html"), "DASHBOARD"))
         except Exception:
             print(f"  (skipping {key} — not in bucket; run a push first)")
+    for title, desc, url, tag in LIVE_LINKS:
+        items.append((title, desc, url, tag))
     # Live monitors — whatever Hobbes publish.py pushed under monitors/ (html views + xlsx reports)
     for key in _list("monitors/"):
         name = os.path.basename(key)
+        if name.startswith("dtcc"):        # tape snapshots superseded by the LIVE ECS links above
+            continue
         title = os.path.splitext(name)[0].replace("_", " ").replace("-", " ")
         if key.endswith(".html"):
             items.append((title, "Live monitor — opens in the browser.",
